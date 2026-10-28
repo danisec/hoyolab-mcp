@@ -7,6 +7,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- CI workflow (`.github/workflows/ci.yml`): the test suite on Python 3.10, 3.11 and 3.12,
+  a container build that is started and health-checked, a check that the container fails
+  closed without `HOYOLAB_MCP_SECRET`, Compose file validation, and a tag/`__version__`
+  comparison on release tags.
+- Issue forms for bug reports and feature requests, plus a contact-links configuration.
+- README badges, and a Troubleshooting entry for `/health` answering `503`.
+
+### Fixed
+
+- The `HEALTHCHECK` in the `Dockerfile` used a 5-second timeout and a 15-second
+  start period, while `compose.yaml` used 10 and 30 seconds. On an emulated host (an arm64
+  image on x86_64) starting Python inside the check took about 8 seconds, so the image's
+  own healthcheck reported `unhealthy` for a server that was answering normally. Both now
+  use 10 seconds and 30 seconds.
+
 ## [1.0.0]
 
 First public release.

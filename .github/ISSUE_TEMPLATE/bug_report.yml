@@ -1,0 +1,110 @@
+name: Bug report
+description: Something behaves differently than documented
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please read the warning below before pasting anything.
+
+        **This project stores HoYoLAB session cookies, which are equivalent to being
+        logged into the account.** Do not paste cookie values, `ltoken_v2`, API tokens
+        (`hlt_...`), or your `HOYOLAB_MCP_SECRET` into this form. Cookie *names* are
+        enough to diagnose a linking problem.
+
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: No credentials included
+      description: |
+        Confirm this report contains no cookie values, tokens, or secrets. If you already
+        pasted one by accident, log out of HoYoLAB to invalidate the session, then
+        revoke your tokens with `revoke-all`.
+      options:
+        - label: I have not included cookie values, API tokens, or my HOYOLAB_MCP_SECRET
+          required: true
+        - label: I read the Troubleshooting section of the README
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what happened instead.
+      placeholder: |
+        I asked for my Spiral Abyss stars and got "No HoYoLAB account is linked",
+        although `status --user alice` reports the account as linked.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. docker compose up -d
+        2. link an account via /link
+        3. ask the model for Spiral Abyss data
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `curl -s http://<host>:8899/health`
+      placeholder: '{"status":"ok","version":"1.0.0"}'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: Client
+      description: Which MCP client is connected?
+      options:
+        - Open WebUI
+        - Claude Code
+        - Codex
+        - opencode
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How it runs
+      options:
+        - Docker Compose
+        - Podman Compose
+        - plain docker run / podman run
+        - Local Python (python -m hoyolab_mcp.main)
+    validations:
+      required: true
+
+  - type: input
+    id: retcode
+    attributes:
+      label: HoYoLAB retcode, if any
+      description: |
+        HoYoLAB answers HTTP 200 even when it refuses, so the failure is in the body.
+        `10001` = credential missing or expired, `10101` = credential does not match the
+        UID, `10102` = Battle Chronicle disabled in-game, `10103` = account not found.
+      placeholder: "10102"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        `docker compose logs --tail 50`. Logs contain cookie *names* only, never values,
+        so they are safe to paste — but skim them first.
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Deployment shape, reverse proxy, allowed hosts, anything unusual.

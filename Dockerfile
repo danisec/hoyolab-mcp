@@ -30,7 +30,10 @@ ENV HOYOLAB_MCP_HOST=0.0.0.0 \
 
 EXPOSE 8899
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+# timeout 10s / start-period 30s match compose.yaml. The check itself is trivial, but on an
+# emulated host (an arm64 image on x86_64, say) merely starting Python took ~8s, and a 5s
+# timeout reported "unhealthy" for a server that was answering normally.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8899/health',timeout=4).status==200 else 1)"
 
 CMD ["python", "-m", "hoyolab_mcp.main"]

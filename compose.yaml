@@ -25,9 +25,10 @@ services:
     container_name: hoyolab-mcp
 
     # Every setting comes from .env, which Compose reads automatically for substitution.
-    # `:?` makes a missing or empty value a hard error instead of silently starting a
-    # server with no encryption key -- the server would refuse to start anyway, but a
-    # clear message at `compose up` time is far easier to act on.
+    # `:?` makes a missing or empty value a hard error instead of starting a container
+    # with no encryption key. The server itself also fails closed (503 on /health, an error
+    # from every tool call, no database written), but catching it here means the message
+    # names the variable and appears before a container exists.
     environment:
       HOYOLAB_MCP_SECRET: ${HOYOLAB_MCP_SECRET:?set HOYOLAB_MCP_SECRET in .env - generate it with openssl rand -hex 32}
       FORWARD_USER_INFO_HEADER_JWT_SECRET: ${FORWARD_USER_INFO_HEADER_JWT_SECRET:-}

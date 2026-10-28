@@ -1,5 +1,18 @@
 # HoYoLAB Genshin Battle Chronicle — MCP server
 
+[![CI](https://img.shields.io/github/actions/workflow/status/danisec/hoyolab-mcp/ci.yml?branch=main&label=tests)](https://github.com/danisec/hoyolab-mcp/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/danisec/hoyolab-mcp?label=release)](https://github.com/danisec/hoyolab-mcp/releases/latest)
+[![Licence](https://img.shields.io/github/license/danisec/hoyolab-mcp)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
+[![MCP](https://img.shields.io/badge/MCP-streamable--http-blueviolet)](https://modelcontextprotocol.io)
+
+<!--
+The three GitHub-backed badges above (CI, release, licence) render "repo not found"
+while this repository is private: shields.io queries GitHub anonymously. They start
+working as soon as the repository is made public, and need no change. The Python and MCP
+badges are static and render either way.
+-->
+
 Read-only access to a **Genshin Impact** Battle Chronicle, exposed as MCP tools so a
 model can answer questions like "what are my Abyss stars this rotation?" or "which
 regions am I least finished with?".
@@ -119,8 +132,12 @@ So cookies are the only mechanism. They are handled as follows.
   that person's Genshin data.
 * Values never reach logs or error messages. `redact()` keeps a 4-character prefix; the
   link page logs cookie *names* only.
-* The server refuses to start without `HOYOLAB_MCP_SECRET`, rather than storing a login
-  credential in plaintext.
+* The server **fails closed** without `HOYOLAB_MCP_SECRET`: it starts, but every path that
+  would touch credentials returns an error instead. `/health` answers `503` with the
+  reason, and every tool call fails with the same message. Nothing is ever written
+  unencrypted. Compose additionally refuses to start at all (see [Option A —
+  Compose](#option-a--compose-recommended)), so the usual path fails earlier and more
+  loudly.
 
 ### Linking an account
 
@@ -236,7 +253,9 @@ Both were tested against this file: the container reports `healthy`, `/health` a
 and the MCP handshake returns all 8 tools.
 
 If `HOYOLAB_MCP_SECRET` is missing or empty, Compose refuses to start with a message
-naming the variable — instead of starting a server that would immediately exit.
+naming the variable, so this is caught before a container exists. Run without Compose and
+the server itself still refuses to serve: `/health` returns `503` and every tool call
+returns an error, rather than writing cookies unencrypted.
 
 Common operations:
 
@@ -331,9 +350,10 @@ Requires Python 3.10 or newer (the code uses `X | Y` type syntax and `dict[str, 
 
 ### Configuration
 
-`HOYOLAB_MCP_SECRET` is not optional. The server refuses to start without it rather
-than storing login cookies in plaintext, and changing it later makes already-stored
-cookies unreadable (users simply re-link).
+`HOYOLAB_MCP_SECRET` is not optional, at least 16 characters. Without it the server still
+starts but refuses to do anything with credentials: `/health` returns `503` and tool calls
+return the same explanation, so no cookie is ever written unencrypted. Changing the secret
+later makes already-stored cookies unreadable (users simply re-link).
 
 `HOYOLAB_MCP_PUBLIC_URL` is used to build the account-link URL, so it must be reachable
 from the **user's browser**, not just from the container. Behind a reverse proxy:
@@ -657,6 +677,7 @@ is shared, so there is no "delete everything" flag that could be run by accident
 | `A plain X-OpenWebUI-User-Id header was sent, but it is ignored` | A JWT secret is configured, so unsigned identity is refused | Send the signed `X-OpenWebUI-User-Jwt`, or use an API token |
 | `The API token ... is not valid or has been revoked` | Token typo, or revoked | `issue-token` a new one |
 | `required variable HOYOLAB_MCP_SECRET is missing a value` | `.env` not created or key empty | `printf 'HOYOLAB_MCP_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env` |
+| `/health` answers `503` with `HOYOLAB_MCP_SECRET must be set to at least 16 characters` | Running outside Compose with no secret, so the server fails closed instead of writing cookies unencrypted | Export a secret of 16+ characters, or use Compose, which refuses to start without one |
 | Container is `unhealthy` but `/health` answers | Healthcheck timeout too tight on an emulated host | Raise `healthcheck.timeout` in `compose.yaml` |
 | Container exits: `exec ...: operation not permitted` | Host blocks `no-new-privileges` (e.g. snap Docker) | Remove that `security_opt` entry |
 | `retcode 10001` | Cookies expired or belong to another account | Re-link via `link-url` |

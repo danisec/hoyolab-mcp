@@ -1,0 +1,11 @@
+# Only bug reports and feature requests, so that questions do not get lost in a list of
+# unstructured issues. GitHub Discussions is not enabled for this repository yet, so the
+# third option points at the README instead of an empty discussions page.
+blank_issues_enabled: false
+contact_links:
+  - name: Setup and troubleshooting help
+    url: https://github.com/danisec/hoyolab-mcp#troubleshooting
+    about: Common failures and their fixes — 421 Misdirected Request, retcode 10001/10102, healthcheck issues.
+  - name: Security vulnerability
+    url: https://github.com/danisec/hoyolab-mcp/blob/main/SECURITY.md
+    about: Do not open a public issue for a security problem. See SECURITY.md for private reporting.

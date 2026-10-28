@@ -1,0 +1,200 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push to the same branch cancels the previous run: the older result can no
+  # longer matter, and queued runs would only delay feedback.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the floor: the code uses `X | Y` type syntax at runtime.
+        python-version: ['3.10', '3.11', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python tests/test_hoyolab_mcp.py
+
+  # The tests above never touch the network, so they cannot catch a broken build or a
+  # container that fails to start. This job does, and it is the check that actually
+  # matches what a user runs.
+  docker:
+    name: container builds and starts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          docker build \
+            --build-arg HOYOLAB_MCP_VERSION="${GITHUB_REF_NAME}" \
+            -t hoyolab-mcp:ci .
+
+      - name: Start container
+        run: |
+          # A named volume for /data, exactly as compose.yaml does. A `--tmpfs /data` does
+          # not work: the mount is owned by root, the image runs as uid 10001, so the
+          # database cannot be created and /health answers 503 "unable to open database
+          # file". A fresh named volume is seeded from the image's /data, which is already
+          # owned by uid 10001.
+          docker run -d --name hoyolab-mcp-ci \
+            -p 127.0.0.1:8899:8899 \
+            -e HOYOLAB_MCP_SECRET=ci-secret-value-long-enough-0123456789 \
+            -e HOYOLAB_MCP_PUBLIC_URL=http://localhost:8899 \
+            -e HOYOLAB_MCP_ALLOWED_HOSTS=127.0.0.1:8899,localhost:8899,127.0.0.1,localhost \
+            -v hoyolab-mcp-ci-data:/data \
+            --read-only --tmpfs /tmp --cap-drop ALL \
+            hoyolab-mcp:ci
+
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS -m 4 http://127.0.0.1:8899/health > /tmp/health.json; then
+              echo "health: $(cat /tmp/health.json)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "server did not become healthy; logs:"
+          docker logs hoyolab-mcp-ci
+          exit 1
+
+      - name: Health reports a version
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request
+          body = json.load(urllib.request.urlopen('http://127.0.0.1:8899/health', timeout=5))
+          assert body.get('status') == 'ok', body
+          assert body.get('version'), f'version missing: {body}'
+          print('version:', body['version'])
+          PY
+
+      - name: Fails closed without HOYOLAB_MCP_SECRET
+        run: |
+          # Measured behaviour, verified by hand before writing this step: without a secret
+          # the server still starts, but refuses to touch credentials. /health answers 503
+          # with the reason, every tool call returns that error, and no database file is
+          # created. It does NOT exit, so asserting on the exit code would hang the job.
+          docker volume create hoyolab-mcp-nosec
+          docker run -d --name hoyolab-mcp-nosec \
+            -p 127.0.0.1:8900:8899 \
+            -e HOYOLAB_MCP_SECRET= \
+            -e HOYOLAB_MCP_ALLOWED_HOSTS=127.0.0.1:8900,localhost:8900,127.0.0.1,localhost \
+            -v hoyolab-mcp-nosec:/data \
+            --read-only --tmpfs /tmp --cap-drop ALL \
+            hoyolab-mcp:ci
+
+          code=""
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /tmp/nosec.json -w '%{http_code}' -m 4 \
+                     http://127.0.0.1:8900/health || true)
+            [ "$code" = "503" ] && break
+            sleep 2
+          done
+          echo "health: HTTP $code"
+          cat /tmp/nosec.json || true
+          if [ "$code" != "503" ]; then
+            echo "ERROR: expected 503 without a secret, got '$code'"
+            docker logs hoyolab-mcp-nosec
+            exit 1
+          fi
+
+          # Failing closed means nothing was written: the database is created only once a
+          # usable encryption key exists, so an empty /data proves no plaintext cookie
+          # store could have been opened.
+          if docker exec hoyolab-mcp-nosec sh -c 'ls -A /data | grep -q .'; then
+            echo "ERROR: a database was created without an encryption key"
+            exit 1
+          fi
+          echo "correctly failed closed: 503, and /data is empty"
+
+      - name: Container logs
+        if: failure()
+        run: |
+          docker logs hoyolab-mcp-ci || true
+          docker logs hoyolab-mcp-nosec || true
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f hoyolab-mcp-ci hoyolab-mcp-nosec || true
+          docker volume rm -f hoyolab-mcp-ci-data hoyolab-mcp-nosec || true
+
+  compose:
+    name: compose file is valid
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate with Docker Compose
+        run: |
+          cp .env.example .env
+          echo "HOYOLAB_MCP_SECRET=ci-secret-value-long-enough-0123456789" >> .env
+          docker compose config > /dev/null
+          echo "compose.yaml is valid"
+
+      - name: Compose refuses to start without a secret
+        run: |
+          # Guards the `:?` interpolation: an empty secret must be a hard error.
+          cp .env.example .env
+          if docker compose config > /dev/null 2>&1; then
+            echo "ERROR: compose accepted an empty HOYOLAB_MCP_SECRET"
+            exit 1
+          fi
+          echo "correctly refused an empty secret"
+
+  # A release should not be tagged from a commit that never passed CI.
+  release-check:
+    name: tag matches package version
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare tag with __version__
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          # `set -e` so a failed extraction aborts with the real Python error instead of
+          # comparing the tag against an empty string and reporting a misleading mismatch.
+          set -euo pipefail
+          version=$(python3 - <<'PY'
+          import re, sys
+          src = open('hoyolab_mcp/__init__.py', encoding='utf-8').read()
+          m = re.search(r"__version__\s*=\s*'([^']+)'", src)
+          if not m:
+              sys.exit('could not find __version__ in hoyolab_mcp/__init__.py')
+          print(m.group(1))
+          PY
+          )
+          echo "tag=$tag version=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "ERROR: tag v$tag does not match __version__ $version"
+            exit 1
+          fi
+          echo "tag and __version__ agree"

@@ -1,0 +1,68 @@
+name: Feature request
+description: Suggest a tool, a client integration, or a behaviour change
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before writing, two constraints shape what this project can accept:
+
+        - **It is read-only.** Nothing here can modify a Genshin account. Requests to
+          claim rewards, check in, or change settings are out of scope by design.
+        - **Genshin Impact only.** The Battle Chronicle endpoints used here are the
+          Genshin ones. Adding Star Rail or ZZZ would be a separate client, not a small
+          patch.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: |
+        Describe the situation, not the solution. "I cannot tell which of my characters
+        have no artifacts equipped" is more useful than "add a hasArtifacts field".
+      placeholder: |
+        When deciding what to farm, I want to see which characters have an empty artifact
+        slot, but get_character_artifacts only shows what is equipped.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: The behaviour you have in mind, and which tool it belongs to.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of change
+      options:
+        - New MCP tool
+        - Extra field or detail in an existing tool
+        - New client integration
+        - Deployment / packaging
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        Including "I already tried X". If a wiki or the HoYoLAB app answers this, say so —
+        it may mean the tool is not needed.
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      options:
+        - label: This keeps the server read-only (no account modifications)
+          required: true
+        - label: This concerns Genshin Impact data
+          required: true
