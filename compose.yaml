@@ -1,0 +1,96 @@
+# Compose definition for the HoYoLAB Genshin Battle Chronicle MCP server.
+#
+# Works with BOTH Docker Compose and Podman Compose. Only the long-stable subset of the
+# Compose spec is used, because podman-compose (1.x) does not implement everything
+# Docker Compose does -- notably `env_file` in its long form, which crashes it outright.
+#
+# Quick start:
+#   cp .env.example .env
+#   printf 'HOYOLAB_MCP_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
+#   docker compose up -d          # or: podman compose up -d
+#
+# See README.md ("Installation") for the rest.
+
+name: hoyolab-mcp
+
+services:
+  hoyolab-mcp:
+    image: ${HOYOLAB_MCP_IMAGE:-hoyolab-mcp:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Surfaced by /health, so the running build can be identified later.
+        HOYOLAB_MCP_VERSION: ${HOYOLAB_MCP_VERSION:-dev}
+    container_name: hoyolab-mcp
+
+    # Every setting comes from .env, which Compose reads automatically for substitution.
+    # `:?` makes a missing or empty value a hard error instead of silently starting a
+    # server with no encryption key -- the server would refuse to start anyway, but a
+    # clear message at `compose up` time is far easier to act on.
+    environment:
+      HOYOLAB_MCP_SECRET: ${HOYOLAB_MCP_SECRET:?set HOYOLAB_MCP_SECRET in .env - generate it with openssl rand -hex 32}
+      FORWARD_USER_INFO_HEADER_JWT_SECRET: ${FORWARD_USER_INFO_HEADER_JWT_SECRET:-}
+      HOYOLAB_MCP_PUBLIC_URL: ${HOYOLAB_MCP_PUBLIC_URL:-http://localhost:8899}
+      HOYOLAB_MCP_ALLOWED_HOSTS: ${HOYOLAB_MCP_ALLOWED_HOSTS:-hoyolab-mcp:8899,hoyolab-mcp,localhost:8899,localhost,127.0.0.1:8899,127.0.0.1}
+      HOYOLAB_MCP_DB: /data/hoyolab.db
+      HOYOLAB_MCP_HOST: 0.0.0.0
+      HOYOLAB_MCP_PORT: "8899"
+
+    # Bound to loopback by default. The server has no TLS of its own, so exposing it on
+    # 0.0.0.0 publishes session-cookie-backed data over plaintext. Set
+    # HOYOLAB_MCP_BIND=0.0.0.0 only behind a TLS-terminating reverse proxy on the same
+    # host, and add the public hostname to HOYOLAB_MCP_ALLOWED_HOSTS.
+    ports:
+      - "${HOYOLAB_MCP_BIND:-127.0.0.1}:${HOYOLAB_MCP_PORT_HOST:-8899}:8899"
+
+    # Named volume, not a bind mount: the database holds AES-GCM ciphertexts of HoYoLAB
+    # session cookies, and a bind mount would leave them in a directory that is easy to
+    # copy around or commit. On rootless Podman the volume is also owned correctly
+    # without a manual chown, which a bind mount would need (uid 10001 in the image).
+    volumes:
+      - hoyolab-data:/data
+
+    # The process handles other people's login cookies, so it gets no more privilege
+    # than it needs. These three are verified to work with this image on both Docker and
+    # Podman: the root filesystem is read-only, /tmp is a tmpfs, and the only writable
+    # path is the /data volume. The image already runs as uid 10001 (non-root).
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+
+    # `no-new-privileges` is deliberately NOT enabled here. It is good hardening in
+    # principle, but on a snap-confined Docker it makes every container fail to exec --
+    # even `alpine sleep`, so it is the host, not this image:
+    #
+    #   exec /bin/sleep: operation not permitted
+    #
+    # Because the container already drops ALL capabilities and runs unprivileged, the
+    # marginal benefit is small. Add it back on a host that supports it:
+    #
+    #   security_opt:
+    #     - no-new-privileges:true
+
+    restart: unless-stopped
+
+    # Mirrors the image's own HEALTHCHECK so `compose ps` shows health either way.
+    #
+    # Written as a single shell string, NOT as a list. podman-compose 1.x mangles a list
+    # healthcheck into `python' '-c' '...'`, which fails with "Syntax error: word
+    # unexpected" and leaves the container permanently unhealthy even though the server
+    # is fine. A plain string is passed through correctly by both tools.
+    #
+    # `timeout` is 10s rather than 5s: the check itself is trivial, but on an emulated
+    # host (e.g. an arm64 image on x86_64) merely starting Python took ~8s here, which
+    # made a 5s timeout report "unhealthy" for a server that was answering normally.
+    healthcheck:
+      test: python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8899/health',timeout=4).status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  hoyolab-data:

@@ -1,0 +1,7 @@
+# Pinned to the same MCP SDK version Open WebUI uses (backend/requirements.txt),
+# so the client and server speak an identical protocol revision.
+mcp==1.27.2
+httpx==0.28.1
+PyJWT==2.10.1
+cryptography==44.0.0
+uvicorn==0.34.0

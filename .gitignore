@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Credentials and local state — never commit these.
+#
+# The server stores HoYoLAB session cookies, which are equivalent to a logged-in
+# session. Only encrypted blobs should ever exist on disk, and even those are
+# per-deployment, so they must not travel with the source.
+*.db
+*.db-wal
+*.db-shm
+secret.env
+*.secret
+.env
+.env.*
+!.env.example
+
+# Generated deployment artefacts
+*.container.bak.*
+*.bak
+*.bak.*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
