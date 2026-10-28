@@ -1,10 +1,10 @@
 # HoYoLAB Genshin Battle Chronicle — MCP server
 
-[![CI](https://img.shields.io/github/actions/workflow/status/danisec/hoyolab-mcp/ci.yml?branch=main&label=tests)](https://github.com/danisec/hoyolab-mcp/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/danisec/hoyolab-mcp?label=release)](https://github.com/danisec/hoyolab-mcp/releases/latest)
-[![Licence](https://img.shields.io/github/license/danisec/hoyolab-mcp)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
-[![MCP](https://img.shields.io/badge/MCP-streamable--http-blueviolet)](https://modelcontextprotocol.io)
+[![CI](https://img.shields.io/github/actions/workflow/status/danisec/hoyolab-mcp/ci.yml?branch=main&label=tests&style=flat-square)](https://github.com/danisec/hoyolab-mcp/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/danisec/hoyolab-mcp?label=release&style=flat-square)](https://github.com/danisec/hoyolab-mcp/releases/latest)
+[![Licence](https://img.shields.io/github/license/danisec/hoyolab-mcp?style=flat-square)](https://github.com/danisec/hoyolab-mcp/blob/main/LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square)](https://www.python.org/downloads/)
+[![MCP](https://img.shields.io/badge/MCP-streamable--http-blueviolet?style=flat-square)](https://modelcontextprotocol.io)
 
 Read-only access to a **Genshin Impact** Battle Chronicle, exposed as MCP tools so a
 model can answer questions like "what are my Abyss stars this rotation?" or "which
