@@ -218,7 +218,9 @@ the real fix is an in-game toggle sends them down the wrong path.
 
 ## Installation
 
-Three paths: Compose (recommended), plain `docker run`, or a local Python install.
+Three paths: Compose (recommended), plain `docker run`, or a local Python install. A fourth
+option covers a long-running Podman host that should supervise the service with systemd
+(`deploy.sh`, Option D).
 
 ### Option A — Compose (recommended)
 
@@ -341,6 +343,65 @@ export HOYOLAB_MCP_PUBLIC_URL="http://localhost:8899"
 
 Requires Python 3.10 or newer (the code uses `X | Y` type syntax and `dict[str, str]`).
 
+### Option D — Podman Quadlet (`deploy.sh`)
+
+For a long-running Podman host, `deploy.sh` installs the server as a **systemd user
+service** instead of a Compose container. A Quadlet is turned into a real systemd unit by
+`podman-user-generator`, so it starts on boot, restarts on failure, and needs no login
+session (given `loginctl enable-linger "$USER"`). Compose has no supervision of its own:
+after a reboot, nothing brings the container back.
+
+```bash
+git clone https://github.com/danisec/hoyolab-mcp.git
+cd hoyolab-mcp
+
+./deploy.sh              # init + build + install, then wait for health
+./deploy.sh status       # unit, container, health, and link state
+./deploy.sh logs         # follow the service log
+./deploy.sh backup       # consistent copy of the credential database
+```
+
+Configuration lives in `~/.config/hoyolab-mcp/hoyolab-mcp.env` (mode `600`), outside the
+repository, so a `git clean`, a re-clone, or a `compose down -v` cannot destroy the key
+that makes already-stored cookies readable. The Quadlet itself is generated from that file
+by `./deploy.sh quadlet`, so the published port and bind addresses always match the env
+file — there is no second copy to drift out of sync.
+
+Set these before `./deploy.sh init` to control what it writes:
+
+```bash
+HOYOLAB_MCP_PORT_HOST=8899                    # host port
+HOYOLAB_MCP_BIND=127.0.0.1,100.64.0.5         # publish on loopback AND one more address
+HOYOLAB_MCP_OWUI_CONTAINER=open-webui         # container to adopt the JWT secret from
+```
+
+`HOYOLAB_MCP_BIND` accepts a comma-separated list. Each address becomes its own
+`PublishPort` line, which is narrower than binding `0.0.0.0`: the port stays closed on
+every interface not listed. Any non-loopback address is also added to
+`HOYOLAB_MCP_ALLOWED_HOSTS` and used as the host in `HOYOLAB_MCP_PUBLIC_URL`, because the
+DNS-rebinding check compares the full `Host` header and the link is opened in the user's
+browser.
+
+`./deploy.sh init` **adopts** `FORWARD_USER_INFO_HEADER_JWT_SECRET` from the running
+Open WebUI container rather than generating one. This matters in both directions: when
+this server has the secret, an unsigned `X-OpenWebUI-User-Id` header is rejected outright,
+and when it does not, identity falls back to a header anything reaching the port can
+spoof. The two processes have to agree on the same value, and a generated value never
+would. Re-running `init` is safe: it reports a match and rewrites nothing.
+
+Do **not** also run `podman compose up` for this project. Both would try to own a container
+named `hoyolab-mcp` and would fight over the port and the volume.
+
+Verified on a Podman host: the generated Quadlet is accepted by `podman quadlet -dryrun`
+(exit 0, no parser errors, the expected `PublishPort` line), and the adopted secret matches
+Open WebUI byte for byte. The `status` report was exercised against three cases — this
+server's real port, a port belonging to another service, and a closed port — and refuses to
+print a foreign HTML page as if it were health output.
+
+Not exercised end to end: `build` and `install` (they need a free port and would restart the
+live service). They are the same `podman build` and `systemctl --user restart` steps the
+Compose and `docker run` paths already use.
+
 ### Configuration
 
 `HOYOLAB_MCP_SECRET` is not optional, at least 16 characters. Without it the server still
@@ -368,7 +429,7 @@ Every variable, with its default:
 | `FORWARD_USER_INFO_HEADER_JWT_SECRET` | empty | Verify Open WebUI's forwarded identity; must match Open WebUI |
 | `HOYOLAB_MCP_PUBLIC_URL` | empty (Compose sets `http://localhost:8899`) | Base URL for the account-link message; must be browser-reachable |
 | `HOYOLAB_MCP_ALLOWED_HOSTS` | loopback + container names | Hosts accepted by the DNS-rebinding check |
-| `HOYOLAB_MCP_BIND` | `127.0.0.1` | Host interface to publish on (Compose only) |
+| `HOYOLAB_MCP_BIND` | `127.0.0.1` | Host interface to publish on; `deploy.sh` accepts a comma-separated list, Compose takes one |
 | `HOYOLAB_MCP_PORT_HOST` | `8899` | Host port (Compose only); the container always uses 8899 |
 | `HOYOLAB_MCP_IMAGE` | `hoyolab-mcp:latest` | Image to run |
 | `HOYOLAB_MCP_VERSION` | `dev` | Reported by `/health`; set at build time |

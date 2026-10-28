@@ -15,6 +15,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   comparison on release tags.
 - Issue forms for bug reports and feature requests, plus a contact-links configuration.
 - README badges, and a Troubleshooting entry for `/health` answering `503`.
+- `deploy.sh` installs the server as a Podman **Quadlet** (a systemd user service), with
+  `init`, `build`, `quadlet`, `install`, `status`, `logs` and `backup` subcommands. The
+  Quadlet is generated from the env file, so the published port and bind addresses cannot
+  drift out of sync with it. Documented in the README as Option D.
 
 ### Fixed
 
@@ -23,6 +27,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   image on x86_64) starting Python inside the check took about 8 seconds, so the image's
   own healthcheck reported `unhealthy` for a server that was answering normally. Both now
   use 10 seconds and 30 seconds.
+- `deploy.sh` did not carry `FORWARD_USER_INFO_HEADER_JWT_SECRET` over to the server, even
+  though an earlier revision did. Without it, identity falls back to an unsigned
+  `X-OpenWebUI-User-Id` header that anything able to reach the port can spoof; with a
+  mismatched value, every tool call fails verification. `init` now adopts the secret from
+  the running Open WebUI container and re-running it rewrites nothing.
+- `deploy.sh status` aborted mid-report under `set -o pipefail`: `systemctl is-enabled`
+  exits non-zero for a unit that is not enabled, which killed the function before it
+  printed the container and health lines. It also reported on whatever container happened
+  to be running when its env file was missing, and printed a foreign HTML page verbatim
+  when another service held the port. It now requires the env file, names the port it is
+  checking, and only prints a JSON body.
+- `deploy.sh` defaulted the host port to 8912 while `.env.example`, `compose.yaml` and the
+  README all use 8899, and left `install` pointing at a Quadlet it never created, so a
+  fresh clone could not install at all.
 
 ## [1.0.0]
 
