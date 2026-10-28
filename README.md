@@ -7,10 +7,12 @@
 [![MCP](https://img.shields.io/badge/MCP-streamable--http-blueviolet)](https://modelcontextprotocol.io)
 
 <!--
-The three GitHub-backed badges above (CI, release, licence) render "repo not found"
-while this repository is private: shields.io queries GitHub anonymously. They start
-working as soon as the repository is made public, and need no change. The Python and MCP
-badges are static and render either way.
+The three GitHub-backed badges above (CI, release, licence) read "repo not found" while
+this repository is private: shields.io queries GitHub anonymously, so it cannot see a
+private repository. They start working as soon as the repository is made public and need
+no change. Verified: with the repo private the titles are "tests: repo or workflow not
+found", "release: no releases or repo not found" and "license: repo not found", while the
+Python and MCP badges, which are static, render correctly.
 -->
 
 Read-only access to a **Genshin Impact** Battle Chronicle, exposed as MCP tools so a
