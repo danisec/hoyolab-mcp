@@ -42,9 +42,10 @@ These are accepted trade-offs, not oversights:
 
 Please **do not** open a public issue for a security problem.
 
-Use the repository's private vulnerability reporting (GitHub: *Security → Report a
-vulnerability*). If that is unavailable, open a minimal issue asking for a private
-contact channel, without any details of the flaw.
+Use the repository's private vulnerability reporting, which is enabled:
+<https://github.com/danisec/hoyolab-mcp/security/advisories/new> (or *Security → Report a
+vulnerability* on the repository page). That channel is private between you and the
+maintainer, and produces a GitHub security advisory that can be used to request a CVE.
 
 Include:
 
