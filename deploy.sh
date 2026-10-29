@@ -43,6 +43,14 @@ DEFAULT_IMAGE="localhost/hoyolab-mcp:latest"
 # The Open WebUI container whose forwarded-identity secret this server must share.
 OWUI_CONTAINER="${HOYOLAB_MCP_OWUI_CONTAINER:-open-webui}"
 
+# Single source of truth for the version, read from the package instead of being
+# duplicated here. It is baked into the image as HOYOLAB_MCP_VERSION and reported by
+# /health, so a stale copy would make a deployed server claim the wrong version.
+PACKAGE_VERSION="$(
+  sed -n "s/^__version__ = '\([^']*\)'.*/\1/p" "$PROJECT_DIR/hoyolab_mcp/__init__.py" | head -1
+)"
+[ -n "$PACKAGE_VERSION" ] || { printf 'error: could not read __version__\n' >&2; exit 1; }
+
 log() { printf '%s\n' "$*" >&2; }
 die() { log "error: $*"; exit 1; }
 
@@ -179,7 +187,7 @@ HOYOLAB_MCP_BIND=${binds}
 HOYOLAB_MCP_PORT_HOST=${port}
 HOYOLAB_MCP_ALLOWED_HOSTS=${hosts}
 HOYOLAB_MCP_IMAGE=${DEFAULT_IMAGE}
-HOYOLAB_MCP_VERSION=1.0.0
+HOYOLAB_MCP_VERSION=${PACKAGE_VERSION}
 EOF
   chmod 600 "$ENV_FILE"
   log "  wrote $ENV_FILE (mode 600)"

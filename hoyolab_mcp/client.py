@@ -37,6 +37,18 @@ RECORD_BASE = 'https://sg-public-api.hoyolab.com/event/game_record/genshin/api'
 # record host here returns a 404 page rather than JSON.
 CARD_URL = 'https://bbs-api-os.hoyolab.com/game_record/card/wapi/getGameRecordCard'
 
+# Daily check-in ("Hoyolab Daily Check-In") is a different service from the game record
+# API, on a different host. Both halves of this were measured, because each wrong guess
+# fails with a misleading message rather than a 404:
+#   * `/event/luna/*` (the Star Rail and ZZZ variants) on the public host answers
+#     `retcode -100, "please open this from inside the game"`, which reads like a
+#     permission problem
+#   * `sg-hk4e-api` is the Genshin (hk4e) host and `/event/sol/*` is the Genshin path
+# The `act_id` below is the Genshin check-in activity. It is a public constant in the
+# page URL, not a secret.
+SIGN_BASE = 'https://sg-hk4e-api.hoyolab.com/event/sol'
+SIGN_ACT_ID = 'e202102251931481'
+
 # Genshin server resolution from the UID prefix.
 GENSHIN_SERVERS = {
     'cn_gf01': ('1', '2', '3'),
@@ -67,6 +79,22 @@ RETCODE_MESSAGES = {
     10103: 'The requested game account could not be found (retcode 10103).',
     -1: 'HoYoLAB returned a generic error (retcode -1). Try again shortly.',
     1009: 'The requested data does not exist (retcode 1009).',
+    # The check-in service uses its own codes for "not logged in" and "parameter
+    # missing", and they differ from the game-record API's 10001. Measured: an
+    # unauthenticated `/event/sol/info` answers -100 "Not logged in".
+    -100: (
+        'HoYoLAB rejected the credential for the daily check-in service (retcode -100, '
+        '"Not logged in"). Re-link your account; the stored cookies have expired.'
+    ),
+    # Measured on `dailyNote`: a valid credential with the wrong `server` value answers
+    # 1005 and a message about missing information, not anything that names the
+    # parameter. That makes it look like a broken account rather than a bad argument.
+    1005: (
+        'HoYoLAB rejected the request as incomplete (retcode 1005). For Daily Note this '
+        'is what a mismatched server value looks like; the server is derived from the '
+        'UID, so check that the uid belongs to this account.'
+    ),
+    -1005: 'HoYoLAB rejected the request as missing a required parameter (retcode -1005).',
 }
 
 
@@ -242,3 +270,48 @@ class ChronicleClient:
             },
         )
         return self._check(payload, 'Spiral Abyss')
+
+    def daily_note(self, uid: int | str) -> dict:
+        """Real-time resource state: resin, expeditions, daily tasks, home coin.
+
+        This is the endpoint the mobile app's "Daily Note" widget uses. It is NOT part
+        of `index`: measured, `index` carries no resin, expedition, daily-task or
+        home-coin field at all, which is why a Battle Chronicle-only server cannot
+        answer "how much resin do I have".
+
+        `server` is required. Without it the API answers
+        `retcode -1, "param server error: value length must be at least 1 runes"`,
+        which is a validation complaint rather than a hint that a parameter is missing.
+        """
+        payload = self._request(
+            'dailyNote',
+            params={'role_id': str(uid), 'server': server_for_uid(uid)},
+        )
+        return self._check(payload, 'Daily Note')
+
+    def attendance_info(self) -> dict:
+        """This month's check-in state for the calling account.
+
+        Account-level, not per game UID: the credential identifies the HoYoLAB account
+        and there is no `role_id` parameter, so nothing here is UID-scoped.
+        """
+        payload = self._request('info', params={'act_id': SIGN_ACT_ID}, url=f'{SIGN_BASE}/info')
+        return self._check(payload, 'daily check-in')
+
+    def attendance_rewards(self) -> dict:
+        """The reward list for the current check-in month, plus its month number."""
+        payload = self._request(
+            'home',
+            params={'act_id': SIGN_ACT_ID, 'lang': self._lang},
+            url=f'{SIGN_BASE}/home',
+        )
+        return self._check(payload, 'daily check-in rewards')
+
+    def attendance_resign(self) -> dict:
+        """How many missed check-ins can still be bought back, and at what price."""
+        payload = self._request(
+            'resign_info',
+            params={'act_id': SIGN_ACT_ID, 'lang': self._lang},
+            url=f'{SIGN_BASE}/resign_info',
+        )
+        return self._check(payload, 'check-in make-up allowance')

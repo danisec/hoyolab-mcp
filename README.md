@@ -172,8 +172,78 @@ error message says so explicitly, because otherwise it looks like a broken serve
 | `get_spiral_abyss` | Stars per floor/chamber and the teams used |
 | `get_imaginarium_theater` | Per-period act, medals, coins, optional round roster |
 | `get_exploration` | Per-region exploration %, incomplete regions, offerings |
+| `get_daily_note` | Resin, realm currency, expeditions, daily tasks, weekly boss discount |
+| `get_attendance` | HoYoLAB daily check-in state and today's reward |
 
 All are read-only. Nothing here can modify an account.
+
+`get_attendance` deliberately reports the check-in state and **never claims it**. The
+endpoint that claims the reward (`POST /event/sol/sign`) exists, and this server does not
+call it — see [Read-only means read-only](#read-only-means-read-only).
+
+### Where resin comes from, and why it needs its own tool
+
+The Battle Chronicle page does not show resin, and `index` — the endpoint behind every
+other statistic here — carries no resin, expedition, daily-task or realm-currency field
+at all. Measured against a live account, the whole payload was searched and none of those
+keys appear.
+
+Resin lives in a separate endpoint, `dailyNote`, which is what the mobile app's Daily
+Note widget reads:
+
+| Field | Value on a live account | Reading |
+|---|---|---|
+| `current_resin` / `max_resin` | `157` / `200` | as-is |
+| `resin_recovery_time` | `"20448"` | **seconds**, and a **string** |
+| `home_coin_recovery_time` | `"0"` | already full, not "0 seconds left" |
+| `remain_resin_discount_num` | `0` of `3` | weekly boss discounts left |
+
+Two traps, both of which produced a wrong answer before they were measured:
+
+* **The unit is seconds, not minutes.** Resin 156/200 needs 44 more at one per 8 minutes
+  (352 minutes); the API reported `21072`, which is 351 minutes. Read as minutes it would
+  have claimed the account fills up in 14 days.
+* **`"0"` means "nothing pending".** Rendering it as a duration says "0 seconds", which
+  reads as "about to tick over" — the opposite of "already full".
+
+`get_daily_note` therefore returns each countdown twice: `full_at_seconds` as a number and
+`full_in` as text (`"5h 40m (20448 seconds)"`), plus a `state` of `recovering`, `full` or
+`unknown`. When `state` is `full`, `full_in` is null rather than `"0s"`.
+
+`server` is mandatory for this endpoint. Without it the API answers
+`retcode -1, "param server error: value length must be at least 1 runes"` — a validation
+complaint that never mentions a missing parameter. It is derived from the UID.
+
+### Daily check-in is a different service
+
+`get_attendance` does not use the game-record host at all. The check-in service is
+`sg-hk4e-api.hoyolab.com/event/sol/*`, and it is **account-level**: there is no `role_id`,
+so the tool takes no `uid`.
+
+Getting the host or path wrong fails misleadingly rather than with a 404:
+
+| Attempt | Response |
+|---|---|
+| `/event/luna/info` on the public host | `retcode -100`, "please open this from inside the game" |
+| `/event/sol/info` on `sg-hk4e-api` | `retcode 0` — correct |
+| unauthenticated | `retcode -100`, "Not logged in" (not the record API's `10001`) |
+
+The reward index is the other trap. `total_sign_day` counts days **already signed**, so
+when today is unsigned the next reward is `awards[total_sign_day]`, not
+`awards[total_sign_day - 1]`. Measured live: 28 days signed, `is_sign` false, 31 rewards
+that month — the reward on offer was `awards[28]` (Mora ×5000), while `awards[27]` was
+Hero's Wit ×3. Off by one here reports yesterday's reward as today's.
+
+### Read-only means read-only
+
+The check-in activity has a write endpoint, `POST /event/sol/sign`, which claims the
+reward. This server does not implement it, does not expose it, and a test asserts that
+neither the tool body nor the client contains a path to it.
+
+The reason is that claiming is not reversible and not obvious: a model that silently
+claims a daily reward removes the user's chance to see what it was. Reporting "you have
+not checked in today, the reward is Mora ×5000" leaves the decision with the user.
+
 
 ### `get_genshin_overview` returns every statistic the page shows
 
@@ -212,9 +282,14 @@ the body, not the status code:
 | `10101` | Credential does not match this game UID |
 | `10102` | Player disabled their Battle Chronicle — a privacy setting, not a login problem |
 | `10103` | Game account not found |
+| `1005` | Request rejected as incomplete — for `dailyNote` this is what a mismatched server value looks like |
+| `-100` | Check-in service: not logged in (the check-in service uses its own codes) |
+| `-1005` | Check-in service: a required parameter is missing |
 
 `10102` in particular is called out separately, because telling someone to re-link when
-the real fix is an in-game toggle sends them down the wrong path.
+the real fix is an in-game toggle sends them down the wrong path. `1005` gets the same
+treatment for the opposite reason: it looks like a broken account when the real cause is
+a UID whose server does not match.
 
 ## Installation
 
@@ -277,7 +352,7 @@ With Podman, substitute `podman compose` or `podman-compose` for `docker compose
 To run a published image instead of building, set `HOYOLAB_MCP_IMAGE` in `.env`:
 
 ```bash
-HOYOLAB_MCP_IMAGE=ghcr.io/you/hoyolab-mcp:1.0.0
+HOYOLAB_MCP_IMAGE=ghcr.io/you/hoyolab-mcp:1.1.0
 docker compose up -d          # no --build
 ```
 
@@ -621,6 +696,10 @@ Once connected, ask in natural language. The model picks the tool.
 | "What are my Spiral Abyss stars this rotation?" | `get_spiral_abyss` |
 | "How did I do in Imaginarium Theater?" | `get_imaginarium_theater` |
 | "Which regions are least explored?" | `get_exploration` |
+| "How much resin do I have?" | `get_daily_note` |
+| "Are my expeditions done?" | `get_daily_note` |
+| "Did I check in on HoYoLAB today?" | `get_attendance` |
+| "What's today's check-in reward?" | `get_attendance` |
 | "Show my Furina's artifacts and total CRIT" | `get_character_artifacts` |
 | "List my characters by level" | `get_characters` |
 
@@ -645,7 +724,7 @@ docker compose up -d --build
 Then confirm what is actually running:
 
 ```bash
-curl -s http://localhost:8899/health   # {"status":"ok","version":"1.0.0"}
+curl -s http://localhost:8899/health   # {"status":"ok","version":"1.1.0"}
 ```
 
 `version` comes from the `HOYOLAB_MCP_VERSION` build argument, so it reports the image
@@ -666,7 +745,7 @@ configured.
 To undo an upgrade, run the previous image tag again against the same volume:
 
 ```bash
-HOYOLAB_MCP_IMAGE=hoyolab-mcp:1.0.0 docker compose up -d
+HOYOLAB_MCP_IMAGE=hoyolab-mcp:1.1.0 docker compose up -d
 ```
 
 Rolling back is safe because the database is only ever extended, never rewritten in a
@@ -774,14 +853,24 @@ vulnerability reporting (*Security → Report a vulnerability*). See
 
 ## Limitations
 
-* **Read-only.** Nothing here can modify a Genshin account.
+* **Read-only.** Nothing here can modify a Genshin account. That includes the daily
+  check-in: the reward is reported, never claimed.
 * **Genshin Impact only.** Honkai: Star Rail, ZZZ and Honkai Impact 3rd are listed by
-  `list_game_accounts` but have no tools.
+  `list_game_accounts` but have no tools. The check-in tool uses the Genshin (`hk4e`)
+  activity, so it reports Genshin check-in only.
 * **Unofficial endpoints.** HoYoverse can change or restrict them without notice; a
   breaking change here would surface as an unexpected `retcode`, not a version warning.
 * **Overseas accounts only.** The `DS` salt and endpoints used are the overseas
   (`os_*`) set; mainland China (Miyoushe) is untested.
 * **No caching.** Every call hits HoYoLAB, so a chatty model can hit rate limits.
+  `get_attendance` makes three requests (info, rewards, make-up allowance) rather than
+  one, so it is the most rate-limit-sensitive tool here.
+* **Expedition icons, not names.** `dailyNote` returns `avatar_side_icon` (an image URL)
+  but no character name, so expedition entries carry no character name rather than a
+  guessed one.
+* **No per-task detail.** The `daily_task` payload's per-task entries contain only a
+  status string with no identifying field, so `get_daily_note` reports the finished/total
+  count and not a named breakdown.
 
 ## Tests
 
@@ -797,6 +886,14 @@ that an unsigned header is refused once a JWT secret exists), UID→server mappi
 the exact wire shape of each API call (two real bugs were found this way:
 `character/list` takes its parameters in the JSON body, and the account list lives on
 the community host).
+
+The two newer tools carry tests for the specific ways they can report a wrong number:
+seconds-vs-minutes on `resin_recovery_time`, `"0"` meaning "full" rather than "0 seconds",
+a missing `max_resin` not being called "full", the check-in reward index being off by one,
+the check-in host and path, and — structurally — that no code path reaches
+`POST /event/sol/sign`. `ToolSignatureTests` walks the registered tools and asserts each
+declares `ctx`, because a tool that forgets it only fails at call time, as
+`name 'ctx' is not defined`, which no helper-level test would catch.
 
 For a live server, `verify_e2e.py` checks the deployed behaviour end to end. It is a
 host-side script and is **not** baked into the image, and the container's root filesystem

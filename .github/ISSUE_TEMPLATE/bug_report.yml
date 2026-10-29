@@ -54,7 +54,7 @@ body:
     attributes:
       label: Version
       description: Output of `curl -s http://<host>:8899/health`
-      placeholder: '{"status":"ok","version":"1.0.0"}'
+      placeholder: '{"status":"ok","version":"1.1.0"}'
     validations:
       required: true
 

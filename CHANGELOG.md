@@ -7,8 +7,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-29
+
 ### Added
 
+- `get_daily_note` — current resin, realm currency, expeditions, daily tasks, weekly boss
+  discount and Parametric Transformer state. The Battle Chronicle `index` endpoint carries
+  none of these, so resin was previously unanswerable. Countdowns are returned as both raw
+  seconds and readable text, because the API sends `resin_recovery_time` as a **string of
+  seconds** and `"0"` means "already full" — reading it as minutes overstated the refill
+  time by roughly 60×.
+- `get_attendance` — HoYoLAB daily check-in state: whether today is signed, days signed
+  this month, the reward on offer, and the make-up allowance. Read-only: the claim
+  endpoint (`POST /event/sol/sign`) is deliberately not implemented, and a test asserts
+  no code path reaches it.
+- `retcode` messages for `1005` (a mismatched `server` on `dailyNote`), and `-100` /
+  `-1005` (the check-in service's own codes, which differ from the record API's `10001`).
+- `ToolSignatureTests`: every registered tool must declare `ctx: Context`. A tool without
+  it fails only at call time with `name 'ctx' is not defined`, which helper-level tests
+  cannot see — this caught exactly that bug in `get_attendance` during development.
+- README sections explaining where resin actually lives, why the check-in service is a
+  different host, the reward-index off-by-one, and why claiming is left to the user.
 - CI workflow (`.github/workflows/ci.yml`): the test suite on Python 3.10, 3.11 and 3.12,
   a container build that is started and health-checked, a check that the container fails
   closed without `HOYOLAB_MCP_SECRET`, Compose file validation, and a tag/`__version__`

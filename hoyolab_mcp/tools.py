@@ -324,6 +324,232 @@ def _exploration_summary(index: dict) -> dict:
     }
 
 
+def _duration(seconds: Any) -> Optional[str]:
+    """Human-readable duration for an API countdown, or None when there is nothing to say.
+
+    Two measured traps are handled here rather than in each caller:
+
+    * The API sends these counts as STRINGS ("21072"), so `int(value)` is required
+      before any arithmetic. Comparing a string with a number raises in Python 3, and
+      adding them concatenates or fails depending on the other operand.
+    * `"0"` means the resource is already full or nothing is regenerating. It must not
+      be rendered as "0 seconds", which reads as "about to tick over". It returns None
+      so callers can say "full" instead.
+
+    The unit is SECONDS, and that was verified against live data rather than assumed:
+    resin 156/200 needs 44 more at one per 8 minutes (352 minutes), and the API reported
+    21072 -- 351.2 minutes. Reading it as minutes would have claimed ~14 days.
+    """
+    if seconds in (None, ''):
+        return None
+    try:
+        total = int(seconds)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+
+    days, rest = divmod(total, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, secs = divmod(rest, 60)
+    if days:
+        text = f'{days}d {hours}h'
+    elif hours:
+        text = f'{hours}h {minutes}m'
+    elif minutes:
+        text = f'{minutes}m'
+    else:
+        text = f'{secs}s'
+    return f'{text} ({total} seconds)'
+
+
+def _int_or_none(value: Any) -> Optional[int]:
+    """Coerce an API counter to int, tolerating the strings it sometimes uses."""
+    if value is None or value == '':
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _expeditions(raw: Any) -> list[dict]:
+    """Per-expedition state, kept only when the API actually returns entries.
+
+    An empty `expeditions` list is normal and not a fault: it means no expedition is
+    currently out. The list is left empty rather than filled with placeholders, so a
+    model cannot report a finished expedition that does not exist.
+
+    Only `status` and the remaining time are surfaced. The payload carries
+    `avatar_side_icon` (an image URL) but no character name, so a name is NOT invented
+    here; the icon is passed through untouched for a client that wants to resolve it.
+    """
+    out = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        out.append(
+            {
+                'status': item.get('status'),
+                'remaining_seconds': _int_or_none(item.get('remained_time')),
+                'remaining': _duration(item.get('remained_time')),
+                'icon': item.get('avatar_side_icon'),
+            }
+        )
+    return out
+
+
+def _daily_note_summary(note: dict) -> dict:
+    """Shape `dailyNote` into resin/task/coin state without inventing figures.
+
+    Countdowns are returned twice: as raw seconds (machine-usable) and as readable
+    text, because a model shown "21072" on its own tends to present it as minutes.
+    """
+    resin = _int_or_none(note.get('current_resin'))
+    resin_max = _int_or_none(note.get('max_resin'))
+    resin_seconds = _int_or_none(note.get('resin_recovery_time'))
+
+    # "Full" is only claimed when both numbers are known and equal. A missing max_resin
+    # must not silently become "full", and a zero countdown is the API's own way of
+    # saying nothing is regenerating.
+    resin_full = (
+        resin is not None and resin_max is not None and resin >= resin_max
+    ) or resin_seconds == 0
+    if resin_full:
+        resin_state = 'full'
+    elif resin_seconds is None:
+        resin_state = 'unknown'
+    else:
+        resin_state = 'recovering'
+
+    home_coin = _int_or_none(note.get('current_home_coin'))
+    home_max = _int_or_none(note.get('max_home_coin'))
+    home_seconds = _int_or_none(note.get('home_coin_recovery_time'))
+    home_full = (
+        home_coin is not None and home_max is not None and home_coin >= home_max
+    ) or home_seconds == 0
+    if home_full:
+        home_state = 'full'
+    elif home_seconds is None:
+        home_state = 'unknown'
+    else:
+        home_state = 'accumulating'
+
+    transformer = note.get('transformer') or {}
+    recovery = transformer.get('recovery_time') or {}
+    transformer_seconds = (
+        _int_or_none(recovery.get('Day') or 0) * 86400
+        + _int_or_none(recovery.get('Hour') or 0) * 3600
+        + _int_or_none(recovery.get('Minute') or 0) * 60
+        + _int_or_none(recovery.get('Second') or 0)
+    )
+
+    task = note.get('daily_task') or {}
+    week = note.get('week_active_progress') or {}
+
+    return {
+        'resin': {
+            'current': resin,
+            'max': resin_max,
+            'state': resin_state,
+            'full_at_seconds': 0 if resin_full else resin_seconds,
+            'full_in': None if resin_full else _duration(resin_seconds),
+        },
+        'realm_currency': {
+            'current': home_coin,
+            'max': home_max,
+            'state': home_state,
+            'full_at_seconds': 0 if home_full else home_seconds,
+            'full_in': None if home_full else _duration(home_seconds),
+        },
+        'expeditions': {
+            'current': _int_or_none(note.get('current_expedition_num')),
+            'max': _int_or_none(note.get('max_expedition_num')),
+            'entries': _expeditions(note.get('expeditions')),
+        },
+        'daily_tasks': {
+            'finished': _int_or_none(note.get('finished_task_num')),
+            'total': _int_or_none(note.get('total_task_num')),
+            'extra_reward_claimed': note.get('is_extra_task_reward_received'),
+            # The per-task `task_rewards` entries carry only a status string and no
+            # identifying field, so they cannot be attributed to a named task. They are
+            # deliberately not surfaced: four identical "unfinished" markers read like
+            # four distinct rewards and would be reported as such.
+            'attendance_progress': [
+                {'status': r.get('status'), 'progress': _int_or_none(r.get('progress'))}
+                for r in (task.get('attendance_rewards') or [])
+                if isinstance(r, dict)
+            ],
+        },
+        'weekly_boss_discount': {
+            'remaining': _int_or_none(note.get('remain_resin_discount_num')),
+            'limit': _int_or_none(note.get('resin_discount_num_limit')),
+        },
+        'parametric_transformer': {
+            'obtained': transformer.get('obtained'),
+            'ready': recovery.get('reached'),
+            'remaining': None if recovery.get('reached') else _duration(transformer_seconds),
+        },
+        'weekly_activity': {
+            'current': _int_or_none(week.get('progress_current')),
+            'total': _int_or_none(week.get('progress_total')),
+            'period_current': _int_or_none(week.get('period_progress_current')),
+            'period_total': _int_or_none(week.get('period_progress_total')),
+        },
+    }
+
+
+def _attendance_summary(info: dict, home: dict, resign: dict) -> dict:
+    """Shape the check-in payloads into "did I sign today, and what is today's reward".
+
+    Indexing the reward list needs care. Measured on a live account: `total_sign_day`
+    was 28 with `is_sign` false, while that month's reward list had 31 entries. Because
+    the count covers days already signed and today is still unsigned, the next reward to
+    be claimed is `awards[total_sign_day]` -- index 28, not 27. Off by one here reports
+    yesterday's reward as today's.
+    """
+    awards = [a for a in (home.get('awards') or []) if isinstance(a, dict)]
+    signed_days = _int_or_none(info.get('total_sign_day'))
+    already = bool(info.get('is_sign'))
+
+    today_reward = None
+    if signed_days is not None and 0 <= signed_days < len(awards):
+        award = awards[signed_days]
+        today_reward = {'name': award.get('name'), 'count': _int_or_none(award.get('cnt'))}
+
+    claimed_reward = None
+    if already and signed_days is not None and 0 < signed_days <= len(awards):
+        award = awards[signed_days - 1]
+        claimed_reward = {'name': award.get('name'), 'count': _int_or_none(award.get('cnt'))}
+
+    rewards_left = None
+    if signed_days is not None and awards:
+        rewards_left = max(len(awards) - signed_days, 0)
+
+    return {
+        'signed_in_today': already,
+        'status': 'signed in today' if already else 'not signed in yet today',
+        'days_signed_this_month': signed_days,
+        'month': home.get('month'),
+        'rewards_in_month': len(awards) or None,
+        'rewards_left_this_month': rewards_left,
+        'date': info.get('today'),
+        'reward_claimed_today': claimed_reward,
+        'reward_if_claimed_now': None if already else today_reward,
+        'first_time_binding': info.get('first_bind'),
+        'auto_check_in_subscribed': info.get('is_sub'),
+        'last_day_of_month': info.get('month_last_day'),
+        'make_up': {
+            'allowed_today': _int_or_none(resign.get('resign_limit_daily')),
+            'allowed_this_month': _int_or_none(resign.get('resign_limit_monthly')),
+            'used_today': _int_or_none(resign.get('resign_cnt_daily')),
+            'used_this_month': _int_or_none(resign.get('resign_cnt_monthly')),
+            'missed_days': _int_or_none(resign.get('sign_cnt_missed')),
+            'cost_per_day': _int_or_none(resign.get('cost')),
+        },
+    }
+
+
 def _prop_name(property_map: dict, prop: dict) -> Optional[str]:
     """Readable stat name for a relic property.
 
@@ -834,5 +1060,59 @@ def build_server() -> FastMCP:
         data = client.index(uid)
         summary = _exploration_summary(data)
         return {'uid': uid, **summary}
+
+    @mcp.tool()
+    def get_daily_note(ctx: Context, uid: Optional[str] = None) -> dict:
+        """Current resin, realm currency, expeditions and daily task state.
+
+        This is the "Daily Note" the mobile app shows, and it is the only way to get
+        resin: the Battle Chronicle overview endpoint does not carry resin, expeditions,
+        daily tasks or realm currency at all.
+
+        Returns:
+          * `resin` — `current` / `max`, a `state` of `recovering`, `full` or `unknown`,
+            and `full_in` as readable text (e.g. "5h 51m (21072 seconds)").
+            `full_at_seconds` is the same figure as a number for calculations.
+          * `realm_currency` — realm currency (home coin) with the same shape
+          * `expeditions` — `current` / `max` and one entry per expedition in progress
+          * `daily_tasks` — `finished` / `total` and whether the extra reward is claimed
+          * `weekly_boss_discount` — remaining discounted boss claims this week
+          * `parametric_transformer` — whether it is ready and time remaining
+          * `weekly_activity` — current week's activity progress
+
+        Countdowns are seconds-since-epoch-free durations: report them as durations, not
+        as clock times. When `state` is `full`, `full_in` is null and the resource is
+        capped.
+
+        Args:
+            uid: Genshin UID (9 digits). OMIT entirely when the account is unknown.
+        """
+        client, _ = _client_for(ctx)
+        uid = _require_uid(client, uid)
+        note = client.daily_note(uid)
+        return {'uid': uid, 'server': server_for_uid(uid), **_daily_note_summary(note)}
+
+    @mcp.tool()
+    def get_attendance(ctx: Context) -> dict:
+        """HoYoLAB daily check-in state for this account: signed today, and the reward.
+
+        Account-level, not per game UID: the check-in belongs to the HoYoLAB login, so
+        there is no `uid` argument.
+
+        Returns:
+          * `signed_in_today` — whether today's check-in is already claimed
+          * `days_signed_this_month`, `rewards_in_month`, `rewards_left_this_month`
+          * `reward_claimed_today` — what was actually claimed today, if anything
+          * `reward_if_claimed_now` — what today's check-in would give, if unsigned
+          * `make_up` — how many missed days can be recovered, at what cost
+
+        This is read-only: it reports the state and never claims the reward. Telling the
+        user is the point; claiming on their behalf is not something this server does.
+        """
+        client, _ = _client_for(ctx)
+        info = client.attendance_info()
+        home = client.attendance_rewards()
+        resign = client.attendance_resign()
+        return _attendance_summary(info, home, resign)
 
     return mcp

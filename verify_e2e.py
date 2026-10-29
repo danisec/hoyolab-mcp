@@ -37,6 +37,8 @@ EXPECTED_TOOLS = {
     'get_characters',
     'get_spiral_abyss',
     'get_exploration',
+    'get_daily_note',
+    'get_attendance',
 }
 
 results: list[tuple[bool, str, str]] = []

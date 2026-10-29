@@ -963,5 +963,390 @@ class StatsCompletenessTests(unittest.TestCase):
         self.assertIsNone(out['anemoculus'])
 
 
+class DurationTests(unittest.TestCase):
+    """`resin_recovery_time` is a STRING in SECONDS, and "0" means "nothing pending".
+
+    Both were measured against live data. Resin 156/200 needs 44 more at one per 8
+    minutes, which is 352 minutes; the API reported 21072, i.e. 351.2 minutes. Treating
+    the value as minutes would have reported roughly 14 days instead of 6 hours, and
+    comparing the raw string with a number raises in Python 3.
+    """
+
+    def test_seconds_are_read_as_seconds(self):
+        from hoyolab_mcp.tools import _duration
+
+        # 21072 s = 5h 51m; the same figure as minutes would be ~14.6 days.
+        self.assertEqual(_duration('21072'), '5h 51m (21072 seconds)')
+        self.assertEqual(_duration(21072), '5h 51m (21072 seconds)')
+
+    def test_zero_means_nothing_pending_not_zero_seconds(self):
+        from hoyolab_mcp.tools import _duration
+
+        for value in ('0', 0, '', None):
+            with self.subTest(value=value):
+                self.assertIsNone(_duration(value), f'{value!r} must not render as a countdown')
+
+    def test_junk_does_not_raise(self):
+        from hoyolab_mcp.tools import _duration
+
+        for value in ('n/a', [], {}, '12.5'):
+            with self.subTest(value=value):
+                self.assertIsNone(_duration(value), f'{value!r} is not a countdown')
+
+    def test_float_is_truncated_not_rejected(self):
+        """The API sends strings, but a float must not crash the tool.
+
+        Truncation is acceptable here: a sub-second remainder on a resin timer is not
+        information anyone acts on, and dropping the whole value would lose the answer.
+        """
+        from hoyolab_mcp.tools import _duration
+
+        self.assertEqual(_duration(3.9), '3s (3 seconds)')
+
+    def test_day_scale_keeps_days(self):
+        from hoyolab_mcp.tools import _duration
+
+        self.assertEqual(_duration(2 * 86400 + 3 * 3600), '2d 3h (183600 seconds)')
+
+
+class DailyNoteShapeTests(unittest.TestCase):
+    """Locks in how `dailyNote` is read. Each case is a way to report a wrong number."""
+
+    LIVE = {
+        'current_resin': 156,
+        'max_resin': 200,
+        'resin_recovery_time': '21072',
+        'finished_task_num': 4,
+        'total_task_num': 4,
+        'is_extra_task_reward_received': True,
+        'remain_resin_discount_num': 0,
+        'resin_discount_num_limit': 3,
+        'current_expedition_num': 0,
+        'max_expedition_num': 5,
+        'expeditions': [],
+        'current_home_coin': 300,
+        'max_home_coin': 300,
+        'home_coin_recovery_time': '0',
+        'transformer': {
+            'obtained': True,
+            'recovery_time': {'Day': 0, 'Hour': 0, 'Minute': 0, 'Second': 0, 'reached': True},
+        },
+        'daily_task': {'total_num': 4, 'finished_num': 4, 'is_extra_task_reward_received': True},
+        'week_active_progress': {'progress_current': 3, 'progress_total': 5},
+    }
+
+    def test_live_payload_is_reported_verbatim(self):
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        out = _daily_note_summary(self.LIVE)
+        self.assertEqual(out['resin']['current'], 156)
+        self.assertEqual(out['resin']['max'], 200)
+        self.assertEqual(out['resin']['state'], 'recovering')
+        self.assertEqual(out['resin']['full_at_seconds'], 21072)
+        self.assertEqual(out['resin']['full_in'], '5h 51m (21072 seconds)')
+        self.assertEqual(out['realm_currency']['state'], 'full')
+        self.assertIsNone(out['realm_currency']['full_in'])
+        self.assertEqual(out['expeditions']['current'], 0)
+        self.assertEqual(out['expeditions']['entries'], [])
+        self.assertEqual(out['daily_tasks']['finished'], 4)
+        self.assertEqual(out['weekly_boss_discount']['remaining'], 0)
+        self.assertTrue(out['parametric_transformer']['ready'])
+
+    def test_full_resin_reports_full_not_a_countdown(self):
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        out = _daily_note_summary({'current_resin': 200, 'max_resin': 200, 'resin_recovery_time': '0'})
+        self.assertEqual(out['resin']['state'], 'full')
+        self.assertIsNone(out['resin']['full_in'])
+        self.assertEqual(out['resin']['full_at_seconds'], 0)
+
+    def test_missing_max_resin_is_not_called_full(self):
+        """A missing `max_resin` must not collapse into "full" -- that is a silent lie."""
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        out = _daily_note_summary({'current_resin': 40})
+        self.assertNotEqual(out['resin']['state'], 'full')
+        self.assertEqual(out['resin']['state'], 'unknown')
+        self.assertEqual(out['resin']['current'], 40)
+
+    def test_empty_payload_does_not_crash(self):
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        out = _daily_note_summary({})
+        self.assertIsNone(out['resin']['current'])
+        self.assertIsNone(out['resin']['full_in'])
+        self.assertEqual(out['expeditions']['entries'], [])
+
+    def test_expedition_without_a_name_does_not_invent_one(self):
+        """The payload has `avatar_side_icon` but no character name."""
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        out = _daily_note_summary(
+            {
+                'current_expedition_num': 1,
+                'max_expedition_num': 5,
+                'expeditions': [
+                    {'status': 'Finished', 'remained_time': '0', 'avatar_side_icon': 'https://x/y.png'}
+                ],
+            }
+        )
+        entry = out['expeditions']['entries'][0]
+        self.assertEqual(entry['status'], 'Finished')
+        self.assertNotIn('character', entry)
+        self.assertIsNone(entry['remaining'])
+
+    def test_task_rewards_are_not_reported_as_named_rewards(self):
+        """`task_rewards` entries carry only a status string, so they are not surfaced."""
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        out = _daily_note_summary(
+            {'daily_task': {'task_rewards': [{'status': 'TaskRewardStatusUnfinished'}] * 4}}
+        )
+        self.assertNotIn('task_rewards', out['daily_tasks'])
+
+
+class AttendanceShapeTests(unittest.TestCase):
+    """The reward index is the trap here.
+
+    Measured live: `total_sign_day` 28 with `is_sign` false, and 31 rewards that month.
+    The next reward is `awards[28]`, not `awards[27]`; reading the latter reports
+    yesterday's reward as today's.
+    """
+
+    INFO = {
+        'total_sign_day': 28,
+        'today': '2026-10-29',
+        'is_sign': False,
+        'first_bind': False,
+        'is_sub': False,
+        'month_last_day': False,
+    }
+    HOME = {
+        'month': 10,
+        'awards': [{'name': f'Reward {i}', 'cnt': i} for i in range(31)],
+    }
+    RESIGN = {
+        'resign_cnt_daily': 0,
+        'resign_cnt_monthly': 0,
+        'resign_limit_daily': 1,
+        'resign_limit_monthly': 3,
+        'sign_cnt_missed': 0,
+        'cost': 1,
+    }
+
+    def test_next_reward_is_indexed_by_days_already_signed(self):
+        from hoyolab_mcp.tools import _attendance_summary
+
+        out = _attendance_summary(self.INFO, self.HOME, self.RESIGN)
+        self.assertFalse(out['signed_in_today'])
+        self.assertEqual(out['days_signed_this_month'], 28)
+        self.assertEqual(out['rewards_in_month'], 31)
+        self.assertEqual(out['rewards_left_this_month'], 3)
+        # awards[28], not awards[27]
+        self.assertEqual(out['reward_if_claimed_now']['name'], 'Reward 28')
+        self.assertIsNone(out['reward_claimed_today'])
+
+    def test_after_signing_the_claimed_reward_is_the_previous_index(self):
+        from hoyolab_mcp.tools import _attendance_summary
+
+        info = dict(self.INFO, total_sign_day=29, is_sign=True)
+        out = _attendance_summary(info, self.HOME, self.RESIGN)
+        self.assertTrue(out['signed_in_today'])
+        self.assertEqual(out['status'], 'signed in today')
+        self.assertEqual(out['reward_claimed_today']['name'], 'Reward 28')
+        self.assertIsNone(out['reward_if_claimed_now'])
+
+    def test_make_up_allowance_is_passed_through(self):
+        from hoyolab_mcp.tools import _attendance_summary
+
+        out = _attendance_summary(self.INFO, self.HOME, self.RESIGN)
+        self.assertEqual(out['make_up']['allowed_today'], 1)
+        self.assertEqual(out['make_up']['allowed_this_month'], 3)
+        self.assertEqual(out['make_up']['missed_days'], 0)
+
+    def test_missing_award_list_does_not_index_out_of_range(self):
+        from hoyolab_mcp.tools import _attendance_summary
+
+        out = _attendance_summary(self.INFO, {}, {})
+        self.assertIsNone(out['reward_if_claimed_now'])
+        self.assertIsNone(out['rewards_in_month'])
+        self.assertIsNone(out['rewards_left_this_month'])
+
+    def test_signed_day_beyond_the_list_is_not_indexed(self):
+        from hoyolab_mcp.tools import _attendance_summary
+
+        out = _attendance_summary(dict(self.INFO, total_sign_day=99), self.HOME, self.RESIGN)
+        self.assertIsNone(out['reward_if_claimed_now'])
+        self.assertEqual(out['rewards_left_this_month'], 0)
+
+    def test_empty_payload_does_not_crash(self):
+        from hoyolab_mcp.tools import _attendance_summary
+
+        out = _attendance_summary({}, {}, {})
+        self.assertFalse(out['signed_in_today'], 'an absent is_sign is not a signature')
+        self.assertEqual(out['status'], 'not signed in yet today')
+        self.assertIsNone(out['days_signed_this_month'])
+        self.assertIsNone(out['reward_if_claimed_now'])
+        self.assertIsNone(out['reward_claimed_today'])
+
+
+class DailyNoteRequestShapeTests(unittest.TestCase):
+    """`dailyNote` needs `server`; omitting it fails with a validation complaint.
+
+    Measured: without `server` the API answers retcode -1, "param server error: value
+    length must be at least 1 runes", which does not hint that a parameter is missing.
+    The check-in endpoints live on a different host than the record API, and using the
+    public host with `/event/luna/*` answers "open this from inside the game" instead of
+    a 404, which reads like a permission problem.
+    """
+
+    def _capture(self, call):
+        import httpx
+        from unittest import mock
+
+        captured = {}
+
+        class FakeResp:
+            status_code = 200
+
+            def json(self):
+                return {'retcode': 0, 'data': {}}
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def get(self, url, params=None, headers=None):
+                captured.update(method='GET', url=url, params=params, headers=headers)
+                return FakeResp()
+
+        with mock.patch.object(httpx, 'Client', FakeClient):
+            client = ChronicleClient({'ltuid_v2': '1', 'ltoken_v2': 'x'})
+            call(client)
+        return captured
+
+    def test_daily_note_sends_role_id_and_server(self):
+        c = self._capture(lambda cl: cl.daily_note('812345678'))
+        self.assertEqual(c['method'], 'GET')
+        self.assertIn('/dailyNote', c['url'])
+        self.assertIn('sg-public-api.hoyolab.com', c['url'])
+        self.assertEqual(c['params']['role_id'], '812345678')
+        self.assertEqual(c['params']['server'], 'os_asia')
+
+    def test_daily_note_server_comes_from_the_uid(self):
+        c = self._capture(lambda cl: cl.daily_note('700000001'))
+        self.assertEqual(c['params']['server'], 'os_euro')
+
+    def test_attendance_uses_the_hk4e_host_and_sol_path(self):
+        for method, path in (
+            ('attendance_info', '/event/sol/info'),
+            ('attendance_rewards', '/event/sol/home'),
+            ('attendance_resign', '/event/sol/resign_info'),
+        ):
+            with self.subTest(method=method):
+                c = self._capture(lambda cl, m=method: getattr(cl, m)())
+                self.assertIn('sg-hk4e-api.hoyolab.com', c['url'], 'the Genshin check-in host')
+                self.assertIn(path, c['url'])
+                self.assertNotIn('luna', c['url'], 'luna is the Star Rail/ZZZ path')
+                self.assertEqual(c['params']['act_id'], 'e202102251931481')
+
+    def test_attendance_is_account_level_not_uid_scoped(self):
+        c = self._capture(lambda cl: cl.attendance_info())
+        self.assertNotIn('role_id', c['params'])
+        self.assertNotIn('server', c['params'])
+
+
+class ReadOnlyGuaranteeTests(unittest.TestCase):
+    """The check-in endpoint has a POST that CLAIMS the reward. This server must not.
+
+    Verified structurally rather than by intent: the tool body is inspected for the
+    signing call, and the client is checked to expose no write path for check-in.
+    """
+
+    def test_no_check_in_tool_posts_a_sign_request(self):
+        import inspect
+
+        from hoyolab_mcp import client as client_module
+        from hoyolab_mcp import tools
+
+        source = inspect.getsource(tools.build_server)
+        attendance = source[source.index('def get_attendance') :]
+        # The claim endpoint is POST /event/sol/sign. Neither the path nor a POST may
+        # appear in the tool body; the only calls it makes are the three read methods.
+        self.assertNotIn('/sign', attendance)
+        self.assertNotIn('post', attendance.lower())
+        self.assertIn('attendance_info', attendance)
+
+        client_source = inspect.getsource(client_module)
+        self.assertNotIn('sol/sign', client_source)
+        self.assertNotIn("SIGN_BASE}/sign", client_source)
+
+    def test_client_has_no_attendance_sign_method(self):
+        from hoyolab_mcp.client import ChronicleClient
+
+        names = [n for n in dir(ChronicleClient) if not n.startswith('__')]
+        self.assertIn('attendance_info', names)
+        for forbidden in ('attendance_sign', 'sign', 'claim', 'attendance_claim'):
+            self.assertNotIn(forbidden, names)
+
+    def test_attendance_docstring_states_it_is_read_only(self):
+        import inspect
+
+        from hoyolab_mcp import tools
+
+        source = inspect.getsource(tools.build_server)
+        attendance = source[source.index('def get_attendance') :]
+        self.assertIn('read-only', attendance.lower())
+
+
+class ToolSignatureTests(unittest.TestCase):
+    """Every tool must declare `ctx`, and none may be a write operation.
+
+    A missing `ctx` parameter is invisible to unit tests that call the helpers directly
+    -- it only fails at call time, as `name 'ctx' is not defined`, which a model sees as
+    a broken tool. This test walks the real server's registered tools instead.
+    """
+
+    def _tools(self):
+        from hoyolab_mcp.tools import build_server
+
+        server = build_server()
+        return server._tool_manager.list_tools()  # noqa: SLF001 - intentional introspection
+
+    def test_every_tool_declares_a_context(self):
+        import inspect
+
+        for tool in self._tools():
+            with self.subTest(tool=tool.name):
+                params = inspect.signature(tool.fn).parameters
+                self.assertIn('ctx', params, f'{tool.name} must take ctx: Context')
+                annotation = str(params['ctx'].annotation)
+                self.assertIn('Context', annotation, f'{tool.name} ctx must be a Context')
+
+    def test_new_tools_are_registered(self):
+        names = {t.name for t in self._tools()}
+        self.assertIn('get_daily_note', names)
+        self.assertIn('get_attendance', names)
+        # The two new tools must not have displaced anything.
+        self.assertEqual(len(names), 10, sorted(names))
+
+    def test_attendance_takes_no_uid(self):
+        """Check-in is account-level; offering a uid would imply per-character data."""
+        import inspect
+
+        for tool in self._tools():
+            if tool.name == 'get_attendance':
+                params = set(inspect.signature(tool.fn).parameters)
+                self.assertNotIn('uid', params)
+                return
+        self.fail('get_attendance not registered')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
