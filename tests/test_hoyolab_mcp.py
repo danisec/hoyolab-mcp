@@ -1270,24 +1270,65 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
     """
 
     def test_no_check_in_tool_posts_a_sign_request(self):
-        import inspect
+        """Assert on the HTTP method actually issued, not on words in the source.
 
-        from hoyolab_mcp import client as client_module
+        An earlier version asserted `'post' not in source.lower()`, which failed for any
+        word containing "post" ("postpone", "post-processing") and proved nothing about
+        the request. This drives the client with a fake transport and inspects the method
+        and URL of every call the tool makes.
+        """
+        import asyncio
+        import httpx
+        from unittest import mock
+
         from hoyolab_mcp import tools
 
-        source = inspect.getsource(tools.build_server)
-        attendance = source[source.index('def get_attendance') :]
-        # The claim endpoint is POST /event/sol/sign. Neither the path nor a POST may
-        # appear in the tool body; the only calls it makes are the three read methods.
-        self.assertNotIn('/sign', attendance)
-        self.assertNotIn('post', attendance.lower())
-        self.assertIn('attendance_info', attendance)
+        calls = []
 
-        client_source = inspect.getsource(client_module)
-        self.assertNotIn('sol/sign', client_source)
-        self.assertNotIn("SIGN_BASE}/sign", client_source)
+        class FakeResp:
+            status_code = 200
+
+            def json(self):
+                return {'retcode': 0, 'data': {'awards': [], 'month': 10}}
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def _record(self, method, url, params=None, **kw):
+                calls.append((method, url, params or {}))
+                return FakeResp()
+
+            def get(self, url, params=None, headers=None, **kw):
+                return self._record('GET', url, params)
+
+            def post(self, url, params=None, json=None, headers=None, **kw):
+                return self._record('POST', url, params)
+
+        server = tools.build_server()
+        tool = next(t for t in server._tool_manager.list_tools() if t.name == 'get_attendance')  # noqa: SLF001
+
+        with mock.patch.object(httpx, 'Client', FakeClient), mock.patch.object(
+            tools, '_client_for', lambda ctx: (tools.ChronicleClient({'ltuid_v2': '1', 'ltoken_v2': 'x'}), 'u')
+        ):
+            asyncio.run(tool.run({}, None))
+
+        self.assertTrue(calls, 'the tool made no request at all')
+        methods = {m for m, _, _ in calls}
+        self.assertEqual(methods, {'GET'}, f'check-in tool must only GET, saw {methods}')
+        for method, url, params in calls:
+            self.assertNotIn('/sign', url, 'the claim endpoint must never be called')
+            self.assertIn('/event/sol/', url)
+            self.assertEqual(params.get('act_id'), 'e202102251931481')
 
     def test_client_has_no_attendance_sign_method(self):
+        """A write method must not exist to be called by accident."""
         from hoyolab_mcp.client import ChronicleClient
 
         names = [n for n in dir(ChronicleClient) if not n.startswith('__')]
@@ -1296,13 +1337,22 @@ class ReadOnlyGuaranteeTests(unittest.TestCase):
             self.assertNotIn(forbidden, names)
 
     def test_attendance_docstring_states_it_is_read_only(self):
+        """The tool description tells the model it cannot claim. Prose, but load-bearing.
+
+        A model reads this docstring as the tool description, so a docstring that promised
+        a claim action would change behaviour even with read-only code behind it.
+        """
         import inspect
 
         from hoyolab_mcp import tools
 
         source = inspect.getsource(tools.build_server)
-        attendance = source[source.index('def get_attendance') :]
+        start = source.index('def get_attendance')
+        # Bound the slice at the next tool so this cannot match a later function.
+        end = source.find('return mcp', start)
+        attendance = source[start:end if end != -1 else len(source)]
         self.assertIn('read-only', attendance.lower())
+        self.assertIn('never claims', attendance.lower())
 
 
 class ToolSignatureTests(unittest.TestCase):
@@ -1346,6 +1396,257 @@ class ToolSignatureTests(unittest.TestCase):
                 self.assertNotIn('uid', params)
                 return
         self.fail('get_attendance not registered')
+
+
+class MalformedPayloadTests(unittest.TestCase):
+    """Payloads the API can send that must degrade, not raise.
+
+    Every case here crashed the tool before it was fixed. `client._check()` returns `data`
+    as the API sent it, so a list, a null, or a string is reachable, and `tools.py` states
+    its own contract: "Missing keys produce 'unavailable' markers instead of raising."
+    """
+
+    def test_daily_note_tolerates_non_dict_payload(self):
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        for payload in ([], None, 'x', 0, [1, 2]):
+            with self.subTest(payload=payload):
+                out = _daily_note_summary(payload)
+                self.assertIsNone(out['resin']['current'])
+                self.assertEqual(out['expeditions']['entries'], [])
+
+    def test_attendance_tolerates_non_dict_payloads(self):
+        from hoyolab_mcp.tools import _attendance_summary
+
+        cases = [
+            ([], {}, {}),
+            ({}, [], {}),
+            ({}, {}, []),
+            ({}, {}, None),
+            (None, None, None),
+        ]
+        for info, home, resign in cases:
+            with self.subTest(info=info, home=home, resign=resign):
+                out = _attendance_summary(info, home, resign)
+                self.assertIsNone(out['days_signed_this_month'])
+                self.assertIn('rewards', out['partial'])
+
+    def test_transformer_with_non_numeric_components_does_not_crash(self):
+        """`_int_or_none(...) * 86400` raised TypeError on a non-numeric component."""
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        for bad in ('abc', None, [], {}, ''):
+            with self.subTest(component=bad):
+                out = _daily_note_summary(
+                    {
+                        'current_resin': 100,
+                        'max_resin': 200,
+                        'resin_recovery_time': '48000',
+                        'transformer': {
+                            'obtained': True,
+                            'recovery_time': {'Day': bad, 'Hour': bad, 'reached': False},
+                        },
+                    }
+                )
+                # The resin answer must survive a broken transformer field.
+                self.assertEqual(out['resin']['current'], 100)
+                self.assertEqual(out['resin']['state'], 'recovering')
+                self.assertEqual(out['resin']['full_in'], '13h 20m (48000 seconds)')
+
+    def test_transformer_recovery_time_not_a_dict(self):
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        out = _daily_note_summary({'transformer': {'recovery_time': 'oops'}})
+        self.assertIsNone(out['parametric_transformer']['ready'])
+        self.assertIsNone(out['parametric_transformer']['remaining'])
+
+    def test_partial_fields_are_named(self):
+        from hoyolab_mcp.tools import _attendance_summary
+
+        full = _attendance_summary(
+            {'total_sign_day': 5, 'is_sign': False},
+            {'month': 10, 'awards': [{'name': 'R', 'cnt': 1}] * 31},
+            {'resign_limit_daily': 1},
+        )
+        self.assertEqual(full['partial'], [])
+
+        degraded = _attendance_summary({'total_sign_day': 5, 'is_sign': False}, {}, {})
+        self.assertIn('rewards', degraded['partial'])
+        self.assertIn('make_up', degraded['partial'])
+
+
+class ResinStateHonestyTests(unittest.TestCase):
+    """`state: full` must never be claimed for a payload that has no resin figures.
+
+    An earlier revision wrote `... or resin_seconds == 0`, which reported a full bar for
+    `{'resin_recovery_time': '0'}` -- no `current_resin`, no `max_resin` -- while the
+    comment directly above claimed that could not happen.
+    """
+
+    def test_zero_countdown_without_figures_is_unknown_not_full(self):
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        out = _daily_note_summary({'resin_recovery_time': '0'})['resin']
+        self.assertEqual(out['state'], 'unknown')
+        self.assertIsNone(out['current'])
+        self.assertIsNone(out['max'])
+
+    def test_zero_max_is_not_a_full_bar(self):
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        out = _daily_note_summary(
+            {'current_resin': 0, 'max_resin': 0, 'resin_recovery_time': '0'}
+        )['resin']
+        self.assertNotEqual(out['state'], 'full')
+
+    def test_genuinely_full_is_still_reported(self):
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        out = _daily_note_summary(
+            {'current_resin': 200, 'max_resin': 200, 'resin_recovery_time': '0'}
+        )['resin']
+        self.assertEqual(out['state'], 'full')
+        self.assertIsNone(out['full_in'])
+
+    def test_realm_currency_follows_the_same_rule(self):
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        out = _daily_note_summary({'home_coin_recovery_time': '0'})['realm_currency']
+        self.assertEqual(out['state'], 'unknown')
+
+    def test_transformer_not_obtained_is_not_ready(self):
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        out = _daily_note_summary(
+            {'transformer': {'obtained': False, 'recovery_time': {'reached': True}}}
+        )['parametric_transformer']
+        self.assertFalse(out['ready'])
+
+
+class RewardMonthTests(unittest.TestCase):
+    """The reward list belongs to `home.month`; `info.today` is the current date.
+
+    On the first day of a month the two disagree, and trusting the list reports last
+    month's reward as today's.
+    """
+
+    HOME = {'month': 10, 'awards': [{'name': f'Okt-{i}', 'cnt': 1} for i in range(31)]}
+
+    def test_same_month_reports_the_reward(self):
+        from hoyolab_mcp.tools import _attendance_summary
+
+        out = _attendance_summary(
+            {'total_sign_day': 5, 'is_sign': False, 'today': '2026-10-06'}, self.HOME, {}
+        )
+        self.assertEqual(out['reward_if_claimed_now']['name'], 'Okt-5')
+        self.assertNotIn('reward_month_mismatch', out['partial'])
+
+    def test_new_month_with_stale_reward_list_reports_nothing(self):
+        from hoyolab_mcp.tools import _attendance_summary
+
+        out = _attendance_summary(
+            {'total_sign_day': 1, 'is_sign': False, 'today': '2026-11-01'}, self.HOME, {}
+        )
+        self.assertIsNone(out['reward_if_claimed_now'], 'must not report last month')
+        self.assertIsNone(out['rewards_in_month'])
+        self.assertIn('reward_month_mismatch', out['partial'])
+
+    def test_mismatch_also_suppresses_claimed_reward(self):
+        from hoyolab_mcp.tools import _attendance_summary
+
+        out = _attendance_summary(
+            {'total_sign_day': 1, 'is_sign': True, 'today': '2026-11-01'}, self.HOME, {}
+        )
+        self.assertIsNone(out['reward_claimed_today'])
+        self.assertIn('reward_month_mismatch', out['partial'])
+
+    def test_unparseable_date_does_not_break_the_answer(self):
+        from hoyolab_mcp.tools import _attendance_summary
+
+        out = _attendance_summary({'total_sign_day': 5, 'today': 'bukan-tanggal'}, self.HOME, {})
+        self.assertEqual(out['reward_if_claimed_now']['name'], 'Okt-5')
+
+
+class FieldNamingTests(unittest.TestCase):
+    """`attendance` must not name two different things.
+
+    The API calls in-game weekly task points `attendance_rewards`, while `get_attendance`
+    reports the HoYoLAB check-in. A live chat discussed both at once and the model had to
+    build its own table to keep them apart.
+    """
+
+    def test_weekly_task_points_are_not_called_attendance(self):
+        from hoyolab_mcp.tools import _daily_note_summary
+
+        out = _daily_note_summary(
+            {'daily_task': {'attendance_rewards': [{'status': 'X', 'progress': 2000}]}}
+        )
+        self.assertNotIn('attendance_progress', out['daily_tasks'])
+        self.assertEqual(out['daily_tasks']['weekly_task_points'][0]['progress'], 2000)
+
+
+class AttendanceDegradationTests(unittest.TestCase):
+    """One failing supporting call must not discard the main answer."""
+
+    def _run(self, info, home, resign):
+        import asyncio
+        from unittest import mock
+
+        from hoyolab_mcp import tools
+
+        class Stub:
+            def attendance_info(self):
+                if isinstance(info, Exception):
+                    raise info
+                return info
+
+            def attendance_rewards(self):
+                if isinstance(home, Exception):
+                    raise home
+                return home
+
+            def attendance_resign(self):
+                if isinstance(resign, Exception):
+                    raise resign
+                return resign
+
+        server = tools.build_server()
+        tool = next(t for t in server._tool_manager.list_tools() if t.name == 'get_attendance')  # noqa: SLF001
+        with mock.patch.object(tools, '_client_for', lambda ctx: (Stub(), 'u')):
+            return asyncio.run(tool.run({}, None))
+
+    GOOD_INFO = {'total_sign_day': 29, 'is_sign': True, 'today': '2026-10-29'}
+    GOOD_HOME = {'month': 10, 'awards': [{'name': 'Mora', 'cnt': 5000}] * 31}
+    GOOD_RESIGN = {'resign_limit_daily': 1}
+
+    def test_resign_failure_keeps_the_main_answer(self):
+        from hoyolab_mcp.client import HoyolabError
+
+        out = self._run(self.GOOD_INFO, self.GOOD_HOME, HoyolabError('resign mati'))
+        self.assertTrue(out['signed_in_today'])
+        self.assertEqual(out['days_signed_this_month'], 29)
+        self.assertEqual(out['reward_claimed_today']['name'], 'Mora')
+        self.assertIn('make_up', out['partial'])
+
+    def test_home_failure_keeps_the_main_answer(self):
+        from hoyolab_mcp.client import HoyolabError
+
+        out = self._run(self.GOOD_INFO, HoyolabError('home mati'), self.GOOD_RESIGN)
+        self.assertTrue(out['signed_in_today'])
+        self.assertIsNone(out['reward_claimed_today'])
+        self.assertIn('rewards', out['partial'])
+
+    def test_info_failure_still_fails(self):
+        """`info` is the only payload that answers the question, so it stays mandatory."""
+        from hoyolab_mcp.client import HoyolabError
+
+        with self.assertRaises(Exception) as ctx:
+            self._run(HoyolabError('info mati'), self.GOOD_HOME, self.GOOD_RESIGN)
+        self.assertIn('info mati', str(ctx.exception))
+
+    def test_all_good_reports_nothing_partial(self):
+        out = self._run(self.GOOD_INFO, self.GOOD_HOME, self.GOOD_RESIGN)
+        self.assertEqual(out['partial'], [])
 
 
 if __name__ == '__main__':

@@ -173,7 +173,7 @@ error message says so explicitly, because otherwise it looks like a broken serve
 | `get_imaginarium_theater` | Per-period act, medals, coins, optional round roster |
 | `get_exploration` | Per-region exploration %, incomplete regions, offerings |
 | `get_daily_note` | Resin, realm currency, expeditions, daily tasks, weekly boss discount |
-| `get_attendance` | HoYoLAB daily check-in state and today's reward |
+| `get_attendance` | HoYoLAB daily check-in state, today's reward, and what could not be read |
 
 All are read-only. Nothing here can modify an account.
 
@@ -237,12 +237,58 @@ Hero's Wit ×3. Off by one here reports yesterday's reward as today's.
 ### Read-only means read-only
 
 The check-in activity has a write endpoint, `POST /event/sol/sign`, which claims the
-reward. This server does not implement it, does not expose it, and a test asserts that
-neither the tool body nor the client contains a path to it.
+reward. This server does not implement it, does not expose it, and two tests hold that
+line: one asserts the client has no sign method, the other drives the tool against a fake
+transport and asserts every request it issues is a `GET` whose URL never contains
+`/sign`.
 
 The reason is that claiming is not reversible and not obvious: a model that silently
 claims a daily reward removes the user's chance to see what it was. Reporting "you have
 not checked in today, the reward is Mora ×5000" leaves the decision with the user.
+
+### Degrading instead of failing
+
+`get_attendance` makes three upstream calls, and only one of them answers the question
+people actually ask:
+
+| Call | Answers | If it fails |
+|---|---|---|
+| `/event/sol/info` | did I sign in today? | the tool fails — there is no answer without it |
+| `/event/sol/home` | what is today's reward? | `partial: ["rewards"]`, reward fields null |
+| `/event/sol/resign_info` | can a missed day be recovered? | `partial: ["make_up"]`, allowance null |
+
+A single failing call must not discard the main answer, so `partial` lists what could not
+be read and is empty when everything worked. The same rule applies to `get_daily_note`: a
+malformed `transformer` block yields nulls in `parametric_transformer` rather than taking
+resin down with it.
+
+That is not decoration. Before it was fixed, a non-numeric `recovery_time.Day` raised
+`TypeError: unsupported operand type(s) for *: 'NoneType' and 'int'`, and a `data` payload
+that was a list instead of an object raised `AttributeError` — both failing the whole tool
+over a field nobody asked about.
+
+### Two things called "attendance"
+
+`dailyNote` returns `attendance_rewards`, which are **in-game weekly task points** (2000
+each). `get_attendance` reports the **HoYoLAB daily check-in**. They are unrelated, and a
+live chat that discussed both at once had to build its own table to keep them apart, so
+the tool surfaces them as `weekly_task_points` — deliberately not echoing the API's name.
+
+### `state: full` requires real figures
+
+`resin.state` is `full` only when `current` and `max` are both present and `max` is above
+zero. A zero countdown alone is not proof: an earlier revision reported a full resin bar
+for `{"resin_recovery_time": "0"}` — a payload with no resin count at all — while the
+comment beside it claimed that could not happen. When the figures are missing the state is
+`unknown`, and `full_in` is null rather than `"0s"`.
+
+### The reward list can belong to the wrong month
+
+`home.month` is the month the reward list belongs to; `info.today` is the current date. On
+the first day of a month the two disagree until the list rolls over, so `get_attendance`
+compares them. When they differ, reward fields are null and `partial` contains
+`reward_month_mismatch`, rather than reporting last month's reward as today's.
+
 
 
 ### `get_genshin_overview` returns every statistic the page shows
@@ -320,7 +366,7 @@ podman-compose up -d --build
 ```
 
 Both were tested against this file: the container reports `healthy`, `/health` answers,
-and the MCP handshake returns all 8 tools.
+and the MCP handshake returns all 10 tools.
 
 If `HOYOLAB_MCP_SECRET` is missing or empty, Compose refuses to start with a message
 naming the variable, so this is caught before a container exists. Run without Compose and
@@ -763,7 +809,7 @@ one would be a breaking change called out in the [changelog](CHANGELOG.md):
 | Health path | `/health` |
 | Environment variables | `HOYOLAB_MCP_*` (see [Configuration](#configuration)) |
 | Container port | `8899` |
-| Tool names | the eight names in [Tools](#tools) |
+| Tool names | the ten names in [Tools](#tools) |
 | Database format | readable by later versions |
 
 **If you upgrade an existing install, nothing needs to be re-registered.** The URL, the
@@ -865,6 +911,10 @@ vulnerability reporting (*Security → Report a vulnerability*). See
 * **No caching.** Every call hits HoYoLAB, so a chatty model can hit rate limits.
   `get_attendance` makes three requests (info, rewards, make-up allowance) rather than
   one, so it is the most rate-limit-sensitive tool here.
+* **Partial answers are labelled, not hidden.** When a supporting call fails,
+  `get_attendance` still answers and names the gap in `partial`. A caller that ignores
+  `partial` will see nulls where a value was expected — check it before presenting the
+  result as complete.
 * **Expedition icons, not names.** `dailyNote` returns `avatar_side_icon` (an image URL)
   but no character name, so expedition entries carry no character name rather than a
   guessed one.

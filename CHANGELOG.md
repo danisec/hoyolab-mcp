@@ -41,6 +41,36 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `get_daily_note` raised `TypeError: unsupported operand type(s) for *: 'NoneType' and
+  'int'` whenever `transformer.recovery_time` held a non-numeric component, and
+  `AttributeError` when it was not an object at all. The whole tool failed over a field
+  nobody asked about; resin is now returned regardless. Duration components use a new
+  `_int_or_zero`, which is correct for them because an absent component contributes
+  nothing — unlike a resin count, where zero would be a lie.
+- Both new helpers raised `AttributeError` when `_check()` handed back a `data` payload
+  that was a list, null, or a string rather than an object. `_as_dict` now treats a
+  non-mapping as absent, restoring the module's stated contract: missing data surfaces as
+  an "unavailable" marker, never as an exception.
+- `get_attendance` failed entirely when either supporting call failed, discarding the
+  answer to "did I sign in today?" — which only needs `info`. `info` stays mandatory;
+  `rewards` and `make_up` now degrade to nulls and are named in a new `partial` field.
+- `resin.state` reported `full` for a payload with no resin figures at all
+  (`{"resin_recovery_time": "0"}`), contradicting the comment beside it. `full` now
+  requires both `current` and `max` with `max` above zero; otherwise the state is
+  `unknown`. `realm_currency` follows the same rule.
+- `reward_if_claimed_now` could report the previous month's reward on the first day of a
+  month, because `home.month` lags `info.today`. The two are now compared, and a mismatch
+  yields nulls plus `reward_month_mismatch` in `partial`.
+- `parametric_transformer.ready` reported `true` for an account that had not obtained the
+  transformer, and `remaining: null` was ambiguous between "ready" and "unknown".
+- `daily_tasks.attendance_progress` was renamed `weekly_task_points`. The API calls these
+  `attendance_rewards`, but they are in-game weekly task points, unrelated to the HoYoLAB
+  check-in that `get_attendance` reports; sharing the word invited a model to conflate
+  them, which was observed in a live chat discussing both at once.
+- `test_no_check_in_tool_posts_a_sign_request` asserted `'post' not in source.lower()`,
+  which failed for any word containing "post" and proved nothing about the request. It now
+  drives the tool against a fake transport and asserts every issued request is a `GET`
+  whose URL never contains `/sign`.
 - The `HEALTHCHECK` in the `Dockerfile` used a 5-second timeout and a 15-second
   start period, while `compose.yaml` used 10 and 30 seconds. On an emulated host (an arm64
   image on x86_64) starting Python inside the check took about 8 seconds, so the image's

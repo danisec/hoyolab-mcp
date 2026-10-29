@@ -364,13 +364,43 @@ def _duration(seconds: Any) -> Optional[str]:
 
 
 def _int_or_none(value: Any) -> Optional[int]:
-    """Coerce an API counter to int, tolerating the strings it sometimes uses."""
-    if value is None or value == '':
+    """Coerce an API counter to int, tolerating the strings it sometimes uses.
+
+    Returns None for anything that is not a number, so callers can distinguish "the API
+    did not say" from "the API said zero". Use `_int_or_zero` where a missing component
+    must not propagate None into arithmetic.
+    """
+    if value is None or value == '' or isinstance(value, bool):
         return None
     try:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _int_or_zero(value: Any) -> int:
+    """Numeric component of a compound duration, where absent means zero.
+
+    `_int_or_none(...) * 86400` raised `TypeError: unsupported operand type(s) for *:
+    'NoneType' and 'int'` whenever the API sent a non-numeric component, which took the
+    whole `get_daily_note` answer down over a field nobody asked about. A duration
+    component that is absent or unparseable genuinely contributes nothing, so zero is the
+    correct value here -- unlike a resin count, where zero would be a lie.
+    """
+    parsed = _int_or_none(value)
+    return parsed if parsed is not None else 0
+
+
+def _as_dict(value: Any) -> dict:
+    """Treat anything that is not a mapping as absent.
+
+    `_check()` in client.py returns `data` as the API sent it, and the API is not
+    guaranteed to send an object: a list or null is possible on a schema change or an
+    edge-case account. Calling `.get()` on that raised AttributeError and failed the
+    entire tool, which is the opposite of this module's stated contract -- missing data
+    should surface as an "unavailable" marker, never as an exception.
+    """
+    return value if isinstance(value, dict) else {}
 
 
 def _expeditions(raw: Any) -> list[dict]:
@@ -405,18 +435,23 @@ def _daily_note_summary(note: dict) -> dict:
     Countdowns are returned twice: as raw seconds (machine-usable) and as readable
     text, because a model shown "21072" on its own tends to present it as minutes.
     """
+    note = _as_dict(note)
+
     resin = _int_or_none(note.get('current_resin'))
     resin_max = _int_or_none(note.get('max_resin'))
     resin_seconds = _int_or_none(note.get('resin_recovery_time'))
 
-    # "Full" is only claimed when both numbers are known and equal. A missing max_resin
-    # must not silently become "full", and a zero countdown is the API's own way of
-    # saying nothing is regenerating.
+    # "Full" requires BOTH numbers, and a real cap. An earlier revision also treated a
+    # zero countdown as "full", which reported a full bar for a payload that had no
+    # current_resin at all -- the exact silent invention this branch is meant to prevent.
+    # `max_resin` of 0 is a missing field, not a cap of zero, so it does not count.
     resin_full = (
-        resin is not None and resin_max is not None and resin >= resin_max
-    ) or resin_seconds == 0
+        resin is not None and resin_max is not None and resin_max > 0 and resin >= resin_max
+    )
     if resin_full:
         resin_state = 'full'
+    elif resin is None and resin_max is None:
+        resin_state = 'unknown'
     elif resin_seconds is None:
         resin_state = 'unknown'
     else:
@@ -426,26 +461,40 @@ def _daily_note_summary(note: dict) -> dict:
     home_max = _int_or_none(note.get('max_home_coin'))
     home_seconds = _int_or_none(note.get('home_coin_recovery_time'))
     home_full = (
-        home_coin is not None and home_max is not None and home_coin >= home_max
-    ) or home_seconds == 0
+        home_coin is not None and home_max is not None and home_max > 0 and home_coin >= home_max
+    )
     if home_full:
         home_state = 'full'
+    elif home_coin is None and home_max is None:
+        home_state = 'unknown'
     elif home_seconds is None:
         home_state = 'unknown'
     else:
         home_state = 'accumulating'
 
-    transformer = note.get('transformer') or {}
-    recovery = transformer.get('recovery_time') or {}
+    transformer = _as_dict(note.get('transformer'))
+    recovery = _as_dict(transformer.get('recovery_time'))
     transformer_seconds = (
-        _int_or_none(recovery.get('Day') or 0) * 86400
-        + _int_or_none(recovery.get('Hour') or 0) * 3600
-        + _int_or_none(recovery.get('Minute') or 0) * 60
-        + _int_or_none(recovery.get('Second') or 0)
+        _int_or_zero(recovery.get('Day')) * 86400
+        + _int_or_zero(recovery.get('Hour')) * 3600
+        + _int_or_zero(recovery.get('Minute')) * 60
+        + _int_or_zero(recovery.get('Second'))
     )
+    # `reached` is the API's own "ready to use" flag. It is only trustworthy when the
+    # transformer was actually obtained; otherwise the answer is "not applicable".
+    obtained = transformer.get('obtained')
+    reached = recovery.get('reached')
+    if obtained is False:
+        transformer_ready = False
+    elif reached is True:
+        transformer_ready = True
+    elif reached is False:
+        transformer_ready = False
+    else:
+        transformer_ready = None
 
-    task = note.get('daily_task') or {}
-    week = note.get('week_active_progress') or {}
+    task = _as_dict(note.get('daily_task'))
+    week = _as_dict(note.get('week_active_progress'))
 
     return {
         'resin': {
@@ -471,11 +520,15 @@ def _daily_note_summary(note: dict) -> dict:
             'finished': _int_or_none(note.get('finished_task_num')),
             'total': _int_or_none(note.get('total_task_num')),
             'extra_reward_claimed': note.get('is_extra_task_reward_received'),
+            # Named `weekly_task_points`, not `attendance_*`: the API calls these
+            # `attendance_rewards`, but they are in-game weekly task points (2000 each),
+            # entirely unrelated to the HoYoLAB daily check-in that `get_attendance`
+            # reports. Sharing the word "attendance" between the two invited a model to
+            # conflate them -- observed in a live chat where both were discussed at once.
             # The per-task `task_rewards` entries carry only a status string and no
-            # identifying field, so they cannot be attributed to a named task. They are
-            # deliberately not surfaced: four identical "unfinished" markers read like
-            # four distinct rewards and would be reported as such.
-            'attendance_progress': [
+            # identifying field, so they are deliberately not surfaced: four identical
+            # "unfinished" markers read like four distinct rewards.
+            'weekly_task_points': [
                 {'status': r.get('status'), 'progress': _int_or_none(r.get('progress'))}
                 for r in (task.get('attendance_rewards') or [])
                 if isinstance(r, dict)
@@ -486,9 +539,9 @@ def _daily_note_summary(note: dict) -> dict:
             'limit': _int_or_none(note.get('resin_discount_num_limit')),
         },
         'parametric_transformer': {
-            'obtained': transformer.get('obtained'),
-            'ready': recovery.get('reached'),
-            'remaining': None if recovery.get('reached') else _duration(transformer_seconds),
+            'obtained': obtained,
+            'ready': transformer_ready,
+            'remaining': None if transformer_ready else _duration(transformer_seconds),
         },
         'weekly_activity': {
             'current': _int_or_none(week.get('progress_current')),
@@ -507,33 +560,70 @@ def _attendance_summary(info: dict, home: dict, resign: dict) -> dict:
     the count covers days already signed and today is still unsigned, the next reward to
     be claimed is `awards[total_sign_day]` -- index 28, not 27. Off by one here reports
     yesterday's reward as today's.
+
+    Degradation is deliberate: `info` is the only payload that answers the main question
+    ("did I sign today?"), so `home` and `resign` are optional. When either is missing
+    the corresponding fields become null and `partial` names what could not be read,
+    instead of failing the whole tool over the least important call.
     """
+    info = _as_dict(info)
+    home = _as_dict(home)
+    resign = _as_dict(resign)
+
+    missing = []
+    if not home:
+        missing.append('rewards')
+    if not resign:
+        missing.append('make_up')
+
     awards = [a for a in (home.get('awards') or []) if isinstance(a, dict)]
     signed_days = _int_or_none(info.get('total_sign_day'))
     already = bool(info.get('is_sign'))
 
+    # The reward list belongs to the month in `home['month']`, while `info['today']`
+    # carries the current date. They disagree on the first day of a new month, when the
+    # reward list has not rolled over yet: trusting it would report last month's reward as
+    # today's. When the months differ, the reward is reported as unknown rather than
+    # guessed, and the mismatch is surfaced.
+    month_matches = True
+    today = info.get('today')
+    home_month = _int_or_none(home.get('month'))
+    if isinstance(today, str) and len(today) >= 7 and home_month is not None:
+        try:
+            today_month = int(today[5:7])
+        except ValueError:
+            today_month = None
+        if today_month is not None and today_month != home_month:
+            month_matches = False
+            missing.append('reward_month_mismatch')
+
     today_reward = None
-    if signed_days is not None and 0 <= signed_days < len(awards):
+    if month_matches and signed_days is not None and 0 <= signed_days < len(awards):
         award = awards[signed_days]
         today_reward = {'name': award.get('name'), 'count': _int_or_none(award.get('cnt'))}
 
     claimed_reward = None
-    if already and signed_days is not None and 0 < signed_days <= len(awards):
+    if (
+        month_matches
+        and already
+        and signed_days is not None
+        and 0 < signed_days <= len(awards)
+    ):
         award = awards[signed_days - 1]
         claimed_reward = {'name': award.get('name'), 'count': _int_or_none(award.get('cnt'))}
 
     rewards_left = None
-    if signed_days is not None and awards:
+    if month_matches and signed_days is not None and awards:
         rewards_left = max(len(awards) - signed_days, 0)
 
     return {
         'signed_in_today': already,
         'status': 'signed in today' if already else 'not signed in yet today',
         'days_signed_this_month': signed_days,
-        'month': home.get('month'),
-        'rewards_in_month': len(awards) or None,
+        'month': home_month,
+        'rewards_in_month': (len(awards) or None) if month_matches else None,
         'rewards_left_this_month': rewards_left,
-        'date': info.get('today'),
+        'date': today,
         'reward_claimed_today': claimed_reward,
         'reward_if_claimed_now': None if already else today_reward,
         'first_time_binding': info.get('first_bind'),
@@ -547,6 +637,9 @@ def _attendance_summary(info: dict, home: dict, resign: dict) -> dict:
             'missed_days': _int_or_none(resign.get('sign_cnt_missed')),
             'cost_per_day': _int_or_none(resign.get('cost')),
         },
+        # Empty when everything was read. A model can use this to say "I could not read
+        # the reward list" instead of presenting nulls as fact.
+        'partial': missing,
     }
 
 
@@ -1105,14 +1198,34 @@ def build_server() -> FastMCP:
           * `reward_claimed_today` — what was actually claimed today, if anything
           * `reward_if_claimed_now` — what today's check-in would give, if unsigned
           * `make_up` — how many missed days can be recovered, at what cost
+          * `partial` — what could not be read; empty when everything was available
+
+        `signed_in_today` comes from the check-in state alone, so it is answered even
+        when the reward list or the make-up allowance cannot be fetched. If `partial`
+        names something, report that field as unavailable instead of guessing.
 
         This is read-only: it reports the state and never claims the reward. Telling the
         user is the point; claiming on their behalf is not something this server does.
         """
         client, _ = _client_for(ctx)
+
+        # `info` is mandatory: without it there is no answer at all. The other two are
+        # supporting detail, so a failure there degrades the answer instead of discarding
+        # it -- the least important call must not take the main question down with it.
         info = client.attendance_info()
-        home = client.attendance_rewards()
-        resign = client.attendance_resign()
+
+        home: dict = {}
+        try:
+            home = client.attendance_rewards()
+        except HoyolabError as exc:
+            log.warning('check-in reward list unavailable: %s', exc)
+
+        resign: dict = {}
+        try:
+            resign = client.attendance_resign()
+        except HoyolabError as exc:
+            log.warning('check-in make-up allowance unavailable: %s', exc)
+
         return _attendance_summary(info, home, resign)
 
     return mcp
