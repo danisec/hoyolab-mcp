@@ -1649,5 +1649,139 @@ class AttendanceDegradationTests(unittest.TestCase):
         self.assertEqual(out['partial'], [])
 
 
+class AbyssRosterTests(unittest.TestCase):
+    """The abyss payload names avatars by numeric id only.
+
+    Floor rosters and the per-character rank lists must resolve those ids to names via
+    character/list, falling back to the raw id rather than emitting None.
+    """
+
+    def _map(self):
+        from hoyolab_mcp.tools import _avatar_name_map
+
+        return _avatar_name_map(
+            [
+                {'id': 10000127, 'name': 'Illuga'},
+                {'id': 10000039, 'name': 'Diona'},
+                {'id': 10000126, 'name': 'Zibai'},
+            ]
+        )
+
+    def test_avatar_name_map_keys_by_string_id(self):
+        m = self._map()
+        self.assertEqual(m['10000127'], 'Illuga')
+        self.assertEqual(m['10000039'], 'Diona')
+        self.assertNotIn('99999999', m)
+
+    def test_floors_resolve_names_and_fall_back_to_id(self):
+        from hoyolab_mcp.tools import _abyss_floors
+
+        data = {
+            'floors': [
+                {
+                    'index': 12,
+                    'star': 9,
+                    'max_star': 9,
+                    'levels': [
+                        {
+                            'index': 1,
+                            'star': 3,
+                            'battles': [
+                                {'avatars': [{'id': 10000127, 'level': 90}]},
+                                {'avatars': [{'id': 99999999, 'level': 1}]},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        floors = _abyss_floors(data, self._map())
+        chars = floors[0]['chambers'][0]['battles']
+        self.assertEqual(chars[0]['characters'], ['Illuga'])
+        self.assertEqual(chars[1]['characters'], [99999999])
+
+    def test_roster_stats_resolve_all_rank_fields(self):
+        from hoyolab_mcp.tools import _abyss_roster_stats
+
+        data = {
+            'reveal_rank': [{'avatar_id': 10000127, 'value': 11}],
+            'damage_rank': [{'avatar_id': 10000039, 'value': 472614}],
+            'defeat_rank': [],
+            'take_damage_rank': None,
+            'normal_skill_rank': [{'avatar_id': 99999999, 'value': 107}],
+            'energy_skill_rank': [{'avatar_id': 10000126, 'value': 38}],
+        }
+        stats = _abyss_roster_stats(data, self._map())
+        self.assertEqual(stats['most_used'][0], {'id': 10000127, 'name': 'Illuga', 'value': 11})
+        self.assertEqual(stats['most_damage'][0]['name'], 'Diona')
+        self.assertEqual(stats['most_defeats'], [])
+        self.assertEqual(stats['most_damage_taken'], [])
+        self.assertIsNone(stats['most_skill_uses'][0]['name'])
+        self.assertEqual(stats['most_skill_uses'][0]['id'], 99999999)
+        self.assertEqual(stats['most_burst_uses'][0]['name'], 'Zibai')
+
+
+class ImaginariumRosterTests(unittest.TestCase):
+    """IT rosters come with names; fight stats are id-only and need resolving."""
+
+    def test_it_rounds_uses_present_names(self):
+        from hoyolab_mcp.tools import _it_rounds
+
+        detail = {
+            'rounds_data': [
+                {'round_id': 1, 'avatars': [{'name': 'Flins'}, {'name': 'Yelan'}, {'name': None}]},
+                {'round_id': 2, 'avatars': []},
+            ]
+        }
+        rounds = _it_rounds(detail)
+        self.assertEqual(rounds[0]['round'], 1)
+        self.assertEqual(rounds[0]['characters'], ['Flins', 'Yelan'])
+        self.assertEqual(rounds[1]['characters'], [])
+
+    def test_it_backup_avatars_shapes_entries(self):
+        from hoyolab_mcp.tools import _it_backup_avatars
+
+        detail = {
+            'backup_avatars': [
+                {'avatar_id': 10000025, 'name': 'Xingqiu', 'element': 'Hydro', 'level': 90, 'rarity': 4}
+            ]
+        }
+        out = _it_backup_avatars(detail)
+        self.assertEqual(out, [{'id': 10000025, 'name': 'Xingqiu', 'element': 'Hydro', 'level': 90, 'rarity': 4}])
+
+    def test_it_fight_stats_resolves_ids(self):
+        from hoyolab_mcp.tools import _it_fight_stats
+
+        detail = {
+            'fight_statisic': {
+                'is_show_battle_stats': True,
+                'max_damage_avatar': {'avatar_id': 10000126, 'value': '362511'},
+                'max_defeat_avatar': {'avatar_id': 10000087, 'value': '10'},
+                'max_take_damage_avatar': {'avatar_id': 10000126, 'value': '17478'},
+                'shortest_avatar_list': [
+                    {'avatar_id': 10000087, 'value': ''},
+                    {'avatar_id': 99999999, 'value': ''},
+                ],
+                'total_coin_consumed': {'avatar_id': 0, 'value': '940', 'rarity': 0},
+                'total_use_time': 469,
+            }
+        }
+        names = {'10000126': 'Zibai', '10000087': 'Kuki Shinobu'}
+        stats = _it_fight_stats(detail, names)
+        self.assertEqual(stats['shown'], True)
+        self.assertEqual(stats['max_damage'], {'id': 10000126, 'name': 'Zibai', 'value': '362511'})
+        self.assertEqual(stats['max_damage_taken']['name'], 'Zibai')
+        self.assertEqual(stats['shortest_roster'][0]['name'], 'Kuki Shinobu')
+        self.assertIsNone(stats['shortest_roster'][1]['name'])  # unknown id stays unnamed
+        self.assertEqual(stats['shortest_roster'][1]['id'], 99999999)
+        self.assertEqual(stats['total_coin_consumed'], 940)
+        self.assertEqual(stats['total_use_time'], 469)
+
+    def test_it_fight_stats_survives_missing_detail(self):
+        from hoyolab_mcp.tools import _it_fight_stats
+
+        self.assertEqual(_it_fight_stats({}, {}), {})
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

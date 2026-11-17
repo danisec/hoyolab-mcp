@@ -7,6 +7,43 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-17
+
+### Changed
+
+- `get_imaginarium_theater` now defaults `include_roster=True`, so the per-round
+  characters are always returned without the model having to add the argument. Pass
+  `include_roster=false` for the lighter summary-only payload.
+
+### Added
+
+- `get_imaginarium_theater` now returns, per period: `backup_avatars` (the backup
+  roster, names included by the API) and `fight_stats` (`max_damage`, `max_defeats`,
+  `max_damage_taken`, `shortest_roster`, `total_coin_consumed`, `total_use_time`). The
+  `fight_stats` avatars are id-only in the API and are resolved to names via
+  `character/list`, matching `get_spiral_abyss`'s `roster_stats`.
+- `ImaginariumRosterTests` covering per-round names, backup roster shape, id→name
+  resolution in fight stats, and a missing-detail fallback.
+
+## [1.2.0] - 2026-11-17
+
+### Fixed
+
+- `get_spiral_abyss` returned `[None, None, ...]` for every floor roster: the abyss
+  payload identifies avatars only by numeric id (`id`, `icon`, `level`, `rarity` — no
+  `name` field), and the tool read `a.get('name')`. Names are now resolved from
+  `character/list` (same numeric id space); a failed lookup degrades to raw ids instead
+  of guessing.
+
+### Added
+
+- `get_spiral_abyss` now returns `roster_stats` — the per-character rank lists the abyss
+  payload carries but the tool previously discarded — resolved to names: `most_used`
+  (`reveal_rank`), `most_damage`, `most_defeats`, `most_damage_taken`, `most_skill_uses`
+  (`normal_skill_rank`), `most_burst_uses` (`energy_skill_rank`).
+- `AbyssRosterTests` locking in id→name resolution, the raw-id fallback, and every rank
+  field's mapping.
+
 ## [1.1.0] - 2026-10-29
 
 ### Added

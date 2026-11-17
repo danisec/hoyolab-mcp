@@ -776,6 +776,174 @@ def _format_relic(relic: dict, property_map: dict) -> dict:
     }
 
 
+def _avatar_name_map(raw_characters: Any) -> dict[str, str]:
+    """Map a Genshin avatar id (as string) to its display name.
+
+    The abyss payload identifies avatars only by numeric id; the owned-character list
+    carries the names. Missing ids are simply left out and callers fall back to the
+    raw id.
+    """
+    names: dict[str, str] = {}
+    for item in raw_characters or []:
+        if isinstance(item, dict) and item.get('id') is not None:
+            names[str(item.get('id'))] = item.get('name')
+    return names
+
+
+def _abyss_floors(data: dict, id_to_name: dict[str, str]) -> list[dict]:
+    """Flatten spiralAbyss floors/chambers/battles into compact dicts, resolving names."""
+    floors = []
+    for floor in data.get('floors') or []:
+        if not isinstance(floor, dict):
+            continue
+        chambers = []
+        for ch in floor.get('levels') or []:
+            if not isinstance(ch, dict):
+                continue
+            battles = []
+            for b in ch.get('battles') or []:
+                if not isinstance(b, dict):
+                    continue
+                battles.append(
+                    {
+                        'characters': [
+                            id_to_name.get(str(a.get('id'))) or a.get('id')
+                            for a in (b.get('avatars') or [])
+                            if isinstance(a, dict)
+                        ],
+                        'damage_taken': b.get('damage_taken'),
+                    }
+                )
+            chambers.append(
+                {
+                    'chamber': ch.get('index'),
+                    'stars': ch.get('star'),
+                    'battles': battles,
+                }
+            )
+        floors.append(
+            {
+                'floor': floor.get('index'),
+                'stars': floor.get('star'),
+                'max_stars': floor.get('max_star'),
+                'chambers': chambers,
+            }
+        )
+    return floors
+
+
+# Per-character "rank" lists in the abyss payload (most used, most damage, ...). Each
+# entry is id-only, so names are resolved the same way as the floor rosters.
+_ABYSS_RANKS = (
+    ('most_used', 'reveal_rank'),
+    ('most_damage', 'damage_rank'),
+    ('most_defeats', 'defeat_rank'),
+    ('most_damage_taken', 'take_damage_rank'),
+    ('most_skill_uses', 'normal_skill_rank'),
+    ('most_burst_uses', 'energy_skill_rank'),
+)
+
+
+def _abyss_roster_stats(data: dict, id_to_name: dict[str, str]) -> dict:
+    """Ranked roster statistics (most used/damage/defeats/...), resolved to names."""
+    stats: dict[str, list[dict]] = {}
+    for label, field in _ABYSS_RANKS:
+        out = []
+        for item in data.get(field) or []:
+            if not isinstance(item, dict):
+                continue
+            aid = item.get('avatar_id')
+            out.append(
+                {
+                    'id': aid,
+                    'name': id_to_name.get(str(aid)) if aid is not None else None,
+                    'value': item.get('value'),
+                }
+            )
+        stats[label] = out
+    return stats
+
+
+def _it_rounds(detail: dict) -> list[dict]:
+    """Per-act character rosters from an Imaginarium Theater `detail` block."""
+    rounds = []
+    for rnd in detail.get('rounds_data') or []:
+        if not isinstance(rnd, dict):
+            continue
+        rounds.append(
+            {
+                'round': rnd.get('round_id') or rnd.get('index'),
+                'characters': [
+                    a.get('name')
+                    for a in (rnd.get('avatars') or [])
+                    if isinstance(a, dict) and a.get('name')
+                ],
+            }
+        )
+    return rounds
+
+
+def _it_backup_avatars(detail: dict) -> list[dict]:
+    """The backup roster — characters available but not used in a round."""
+    out = []
+    for a in detail.get('backup_avatars') or []:
+        if not isinstance(a, dict):
+            continue
+        out.append(
+            {
+                'id': a.get('avatar_id'),
+                'name': a.get('name'),
+                'element': a.get('element'),
+                'level': a.get('level'),
+                'rarity': a.get('rarity'),
+            }
+        )
+    return out
+
+
+def _it_roster_entry(item: Any, id_to_name: dict[str, str]) -> Optional[dict]:
+    """Resolve a fight-stat avatar entry (id-only) to {id, name, value}."""
+    if not isinstance(item, dict):
+        return None
+    aid = item.get('avatar_id')
+    return {
+        'id': aid,
+        'name': id_to_name.get(str(aid)) if aid is not None else None,
+        'value': item.get('value'),
+    }
+
+
+def _it_fight_stats(detail: dict, id_to_name: dict[str, str]) -> dict:
+    """Per-period battle statistics; avatar entries are resolved to names.
+
+    Unlike `rounds_data` and `backup_avatars`, every avatar entry under
+    `fight_statisic` carries only `avatar_id`, so names come from character/list.
+    """
+    stats = detail.get('fight_statisic')
+    if not isinstance(stats, dict) or not stats:
+        return {}
+
+    total_coin = stats.get('total_coin_consumed')
+    if isinstance(total_coin, dict):
+        total_coin = total_coin.get('value')
+
+    return {
+        'shown': stats.get('is_show_battle_stats'),
+        'max_damage': _it_roster_entry(stats.get('max_damage_avatar'), id_to_name),
+        'max_defeats': _it_roster_entry(stats.get('max_defeat_avatar'), id_to_name),
+        'max_damage_taken': _it_roster_entry(stats.get('max_take_damage_avatar'), id_to_name),
+        'shortest_roster': [
+            e
+            for e in (
+                _it_roster_entry(a, id_to_name) for a in (stats.get('shortest_avatar_list') or [])
+            )
+            if e
+        ],
+        'total_coin_consumed': _int_or_none(total_coin),
+        'total_use_time': _int_or_none(stats.get('total_use_time')),
+    }
+
+
 def build_server() -> FastMCP:
     # MCP enables DNS-rebinding protection by default with an EMPTY allow-list, which
     # means only localhost is accepted. A request from Open WebUI carries
@@ -1024,7 +1192,7 @@ def build_server() -> FastMCP:
 
     @mcp.tool()
     def get_spiral_abyss(ctx: Context, uid: Optional[str] = None, previous: bool = False) -> dict:
-        """Spiral Abyss results: stars, floors, and the characters used.
+        """Spiral Abyss results: stars, floors, the characters used, and roster stats.
 
         Args:
             uid: Genshin UID. Omit when only one Genshin account is linked.
@@ -1033,36 +1201,12 @@ def build_server() -> FastMCP:
         client, _ = _client_for(ctx)
         uid = _require_uid(client, uid)
         data = client.spiral_abyss(uid, previous=previous)
-        floors = []
-        for floor in data.get('floors') or []:
-            if not isinstance(floor, dict):
-                continue
-            chambers = []
-            for ch in floor.get('levels') or []:
-                if not isinstance(ch, dict):
-                    continue
-                chambers.append(
-                    {
-                        'chamber': ch.get('index'),
-                        'stars': ch.get('star'),
-                        'battles': [
-                            {
-                                'characters': [a.get('name') for a in (b.get('avatars') or []) if isinstance(a, dict)],
-                                'damage_taken': b.get('damage_taken'),
-                            }
-                            for b in (ch.get('battles') or [])
-                            if isinstance(b, dict)
-                        ],
-                    }
-                )
-            floors.append(
-                {
-                    'floor': floor.get('index'),
-                    'stars': floor.get('star'),
-                    'max_stars': floor.get('max_star'),
-                    'chambers': chambers,
-                }
-            )
+        # The abyss payload names characters by numeric id only; character/list carries
+        # the names. If that lookup fails, ids are surfaced as-is rather than guessed.
+        try:
+            id_to_name = _avatar_name_map(client.characters(uid))
+        except HoyolabError:
+            id_to_name = {}
         return {
             'uid': uid,
             'previous_rotation': previous,
@@ -1075,23 +1219,33 @@ def build_server() -> FastMCP:
             'deepest_floor': data.get('max_floor'),
             'battles': data.get('total_battle_times'),
             'wins': data.get('total_win_times'),
-            'floors': floors,
+            'floors': _abyss_floors(data, id_to_name),
+            'roster_stats': _abyss_roster_stats(data, id_to_name),
         }
 
     @mcp.tool()
-    def get_imaginarium_theater(ctx: Context, uid: Optional[str] = None, include_roster: bool = False) -> dict:
+    def get_imaginarium_theater(ctx: Context, uid: Optional[str] = None, include_roster: bool = True) -> dict:
         """Imaginarium Theater results, current and previous period.
 
-        Returns per-period difficulty, highest act reached, medals earned, coins, and
-        optionally the characters used in each round.
+        Returns per-period difficulty, highest act reached, medals earned, coins, and the
+        full roster: characters used per round, the backup roster, and battle statistics.
 
         Args:
             uid: Genshin UID (9 digits). OMIT entirely when the account is unknown.
-            include_roster: Also return the characters used per round (larger payload).
+            include_roster: Include the detailed roster and battle statistics. Default
+                True so the characters used are always returned; pass False for a
+                lighter summary-only payload.
         """
         client, _ = _client_for(ctx)
         uid = _require_uid(client, uid)
         data = client.imaginarium_theater(uid, need_detail=include_roster)
+        # fight_statisic names avatars by id only; character/list carries the names.
+        id_to_name: dict[str, str] = {}
+        if include_roster:
+            try:
+                id_to_name = _avatar_name_map(client.characters(uid))
+            except HoyolabError:
+                id_to_name = {}
 
         periods = []
         for run in data.get('data') or []:
@@ -1109,21 +1263,10 @@ def build_server() -> FastMCP:
                 'tarot_finished': stat.get('tarot_finished_cnt'),
             }
             if include_roster:
-                rounds = []
-                for rnd in ((run.get('detail') or {}).get('rounds_data') or []):
-                    if not isinstance(rnd, dict):
-                        continue
-                    rounds.append(
-                        {
-                            'round': rnd.get('round_id') or rnd.get('index'),
-                            'characters': [
-                                a.get('name')
-                                for a in (rnd.get('avatars') or [])
-                                if isinstance(a, dict) and a.get('name')
-                            ],
-                        }
-                    )
-                entry['rounds'] = rounds
+                detail = run.get('detail') or {}
+                entry['rounds'] = _it_rounds(detail)
+                entry['backup_avatars'] = _it_backup_avatars(detail)
+                entry['fight_stats'] = _it_fight_stats(detail, id_to_name)
             periods.append(entry)
 
         return {
